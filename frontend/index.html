@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sakhi Khata - a fair, talking ledger for women's Self-Help Groups</title>
+<meta name="description" content="Sakhi Khata turns a messy WhatsApp order into a clear order, a fair price, a fair work plan and a pay slip every woman can understand.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Mukta:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#04110e; --deep:#06201a; --card:#0b2f27; --line:#1d7a63; --mint:#5dffc4; --gold:#ffd36b; --text:#e8fff6; --muted:#a8cfc2;
+  --paper:#f6efdc; --paper-ink:#2a2418; --paper-rule:#d9cfb4; --red:#ff5d73;
+  --serif:"Fraunces",Georgia,"Times New Roman",serif; --sans:"Mukta",system-ui,-apple-system,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ink);color:var(--text);font:17px/1.6 var(--sans)}
+a{color:inherit}
+:focus-visible{outline:3px solid var(--gold);outline-offset:3px;border-radius:6px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+
+/* nav */
+nav{position:sticky;top:0;z-index:10;background:#04110ef2;backdrop-filter:blur(8px);border-bottom:1px solid #12392f}
+nav .wrap{display:flex;align-items:center;gap:22px;height:58px}
+.logo{font-family:var(--serif);font-weight:700;font-size:21px;letter-spacing:.5px;color:var(--gold);text-decoration:none;margin-right:auto}
+nav a.l{text-decoration:none;color:var(--muted);font-weight:600;font-size:15px}
+nav a.l:hover{color:var(--text)}
+.btn{display:inline-block;text-decoration:none;font-weight:700;border-radius:999px;padding:11px 22px;border:1.5px solid var(--mint);color:var(--text);background:transparent;transition:background .15s}
+.btn:hover{background:#12604d}
+.btn.main{background:var(--mint);color:#032018}
+.btn.main:hover{background:#8bffd8}
+nav .btn{padding:7px 16px;font-size:15px}
+
+/* hero */
+.hero{padding:64px 0 56px}
+.hero .wrap{display:grid;grid-template-columns:1.05fr .95fr;gap:44px;align-items:center}
+h1{font-family:var(--serif);font-weight:700;font-size:clamp(34px,5vw,54px);line-height:1.08;margin:0 0 18px;letter-spacing:-.5px}
+.lede{font-size:19px;color:var(--muted);margin:0 0 26px;max-width:34em}
+.lede b{color:var(--text)}
+.cta{display:flex;gap:12px;flex-wrap:wrap}
+.promise{margin:26px 0 0;color:var(--gold);font-family:var(--serif);font-size:19px}
+
+/* hero visual: a messy order becomes a clear order */
+.flow{display:grid;gap:14px}
+.bubble{background:#1f3b34;border-radius:14px 14px 14px 4px;padding:12px 14px;max-width:92%;font-size:15.5px;position:relative}
+.bubble small{display:block;color:var(--muted);font-size:12.5px;margin-top:4px}
+.bubble .wave{display:flex;gap:3px;align-items:center;margin-bottom:6px}
+.bubble .wave i{display:block;width:3px;background:var(--mint);border-radius:2px;opacity:.8}
+.arrow{justify-self:center;color:var(--gold);font-size:13px;font-weight:700;text-align:center;line-height:1.3}
+.arrow::before,.arrow::after{content:"";display:block;width:2px;height:16px;background:var(--gold);margin:0 auto;opacity:.6}
+.order{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.order h3{margin:0 0 8px;font-size:15px;color:var(--gold);font-family:var(--sans);font-weight:700}
+.order dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:15.5px}
+.order dt{color:var(--muted)} .order dd{margin:0;font-weight:600}
+.order .ask{margin-top:10px;padding-top:8px;border-top:1px dashed #1d7a6388;color:#ffb020;font-size:14.5px}
+.slip{background:var(--paper);color:var(--paper-ink);border-radius:6px 14px 14px 6px;padding:12px 16px;font-size:15px;border-left:6px solid var(--gold)}
+.slip b{font-family:var(--serif)}
+
+section{padding:62px 0}
+h2{font-family:var(--serif);font-size:clamp(26px,3.4vw,36px);line-height:1.15;margin:0 0 12px;letter-spacing:-.3px}
+.sub{color:var(--muted);max-width:40em;margin:0 0 30px}
+
+/* problem: a khata notebook page */
+.notebook{background:var(--paper);color:var(--paper-ink);position:relative}
+.notebook::before{content:"";position:absolute;left:0;right:0;top:0;height:10px;background:repeating-linear-gradient(90deg,var(--paper-ink) 0 2px,transparent 2px 14px);opacity:.12}
+.notebook h2{color:var(--paper-ink)} .notebook .sub{color:#5a5136}
+.ledger{display:grid;grid-template-columns:1fr 1fr;gap:0 48px}
+.ledger div{padding:13px 0 13px 0;border-bottom:1.5px solid var(--paper-rule);display:grid;grid-template-columns:1fr;gap:2px}
+.ledger b{font-size:17px}
+.ledger span{color:#5a5136;font-size:15.5px}
+.ledger .fix{color:#0a6b4f;font-weight:600}
+.notebook .quote{margin:30px 0 0;font-family:var(--serif);font-size:22px;border-left:5px solid #0a6b4f;padding-left:18px}
+
+/* how it works */
+.steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(3,1fr);gap:16px;counter-reset:s}
+.steps li{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;counter-increment:s}
+.steps li::before{content:counter(s);display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:var(--gold);color:#241a00;font-weight:700;margin-bottom:10px}
+.steps b{display:block;font-size:18px;margin-bottom:2px}
+.steps span{color:var(--muted);font-size:15.5px}
+.steps .who{font-style:normal;display:block;margin-top:8px;color:var(--mint);font-size:14px;font-weight:600}
+
+/* roles */
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:15.5px}
+th,td{padding:12px 14px;text-align:left;border-bottom:1px solid #14473b;vertical-align:top}
+th{background:var(--deep);color:var(--gold);font-weight:700}
+tr:last-child td{border-bottom:0}
+td.no{color:#ff9aa8}
+.scroll{overflow-x:auto}
+
+/* rules */
+.rules{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.rule{border-left:4px solid var(--gold);padding:4px 0 4px 16px}
+.rule b{display:block;font-family:var(--serif);font-size:20px}
+.rule span{color:var(--muted)}
+
+.try{background:var(--deep);border-top:1px solid var(--line);text-align:center}
+.try p{color:var(--muted);max-width:36em;margin:0 auto 24px}
+.try .cta{justify-content:center}
+footer{padding:26px 0;text-align:center;color:var(--muted);font-size:14px;border-top:1px solid #12392f}
+
+@media (max-width:860px){
+  .hero .wrap{grid-template-columns:1fr}
+  .steps{grid-template-columns:1fr 1fr} .ledger{grid-template-columns:1fr} .rules{grid-template-columns:1fr}
+  nav a.l{display:none}
+}
+@media (max-width:520px){ .steps{grid-template-columns:1fr} body{font-size:16px} }
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+.arch{max-width:640px;margin:26px auto 0;text-align:center}.arch .node{border:1px solid #1d4d40;border-radius:14px;padding:14px 16px;background:rgba(255,255,255,.03)}.arch .node b{display:block;font-size:1.05em}.arch .node span{display:block;color:var(--muted);font-size:.92em;margin-top:4px}.arch .core{border-color:#5dffc4}.arch .down{color:var(--muted);padding:8px 0;font-size:1.3em}.arch .pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:520px){.arch .pair{grid-template-columns:1fr}}.wahint{margin-top:10px}
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="logo" href="/">Sakhi Khata</a>
+  <a class="l" href="#problem">The problem</a><a class="l" href="#how">How it works</a><a class="l" href="#who">Who sees what</a>
+  <a class="btn main" href="/app/login.html">Dashboard login</a>
+</div></nav>
+
+<header class="hero"><div class="wrap">
+  <div>
+    <h1>From a WhatsApp voice note to a pay slip every woman can understand.</h1>
+    <p class="lede"><b>Sakhi Khata</b> is a talking ledger for women’s Self-Help Groups. It turns a messy bulk order into a clear order, a fair price, a fair work plan and a pay slip that shows exactly how the money was worked out. It works inside the WhatsApp the group already uses.</p>
+    <div class="cta"><a class="btn main wa" href="https://wa.me/">Start on WhatsApp</a><a class="btn" href="/app/login.html">Open the dashboards</a></div>
+    <p class="muted wahint" id="wahint"></p>
+    <p class="promise">The AI suggests and explains. The group decides.</p>
+  </div>
+  <div class="flow" aria-label="Example: a messy voice note becomes a clear order and a pay slip">
+    <div class="bubble"><div class="wave" aria-hidden="true"><i style="height:8px"></i><i style="height:16px"></i><i style="height:11px"></i><i style="height:20px"></i><i style="height:9px"></i><i style="height:15px"></i><i style="height:7px"></i><i style="height:18px"></i><i style="height:12px"></i></div>
+      “Didi, 200 bags chahiye, blue, Rs 60 each, 5 din mein, same as last time.”<small>Buyer · voice note · 0:11</small></div>
+    <div class="arrow">Sakhi Khata reads it back</div>
+    <div class="order"><h3>Clear order, waiting for the buyer to say yes</h3>
+      <dl><dt>Product</dt><dd>Cloth bag, blue</dd><dt>Quantity</dt><dd>200 pieces</dd><dt>Offered</dt><dd>Rs 60 each</dd><dt>Deadline</dt><dd>5 days</dd></dl>
+      <div class="ask">Unclear: “same as last time” - confirm size and design</div></div>
+    <div class="arrow">Weeks later, after the work</div>
+    <div class="slip"><b>Lakshmi, you made 66 stitching pieces.</b> 62 passed at Rs 16 each = Rs 992. 4 need rework; Rs 64 is added when they pass. Say “I disagree” to question any line.</div>
+  </div>
+</div></header>
+
+<section class="notebook" id="problem"><div class="wrap">
+  <h2>The women have the skill. The process is what’s confusing.</h2>
+  <p class="sub">Millions of Self-Help Groups make bags, pickles, clothes and handicrafts. Most run an order from WhatsApp, phone calls, memory and a paper notebook. Six things go wrong, and each one has a fix.</p>
+  <div class="ledger">
+    <div><b>Orders are unclear</b><span>A voice note says “same as last time.” Size, colour and price are guesses.</span><span class="fix">The order is read back and confirmed before work starts.</span></div>
+    <div><b>Pricing is a guess</b><span>Prices follow habit or buyer pressure, so a low offer can mean a loss.</span><span class="fix">Fixed code adds material, labour and overhead, and shows the floor price.</span></div>
+    <div><b>Work is shared by word of mouth</b><span>Nobody checks skills or free time, and a woman has no easy way to say no.</span><span class="fix">Tasks are suggested with reasons. Anyone can decline, with no penalty.</span></div>
+    <div><b>Payout is not clear</b><span>Members can’t see how their pay was worked out, which breeds doubt and fights.</span><span class="fix">Every pay slip shows pieces × rate. “I disagree” holds the payment.</span></div>
+    <div><b>Deadlines slip quietly</b><span>Falling behind is noticed when it is already too late.</span><span class="fix">Checkpoints raise an alert, and the leader gets simple options.</span></div>
+    <div><b>Records are in someone’s head</b><span>There is nothing to show a buyer, a bank or the mission.</span><span class="fix">A tamper-evident ledger records every decision.</span></div>
+  </div>
+  <p class="quote">Our rule: a machine never decides a woman’s pay.</p>
+</div></section>
+
+<section id="how"><div class="wrap">
+  <h2>How one order moves through Sakhi Khata</h2>
+  <p class="sub">Every step is a short WhatsApp message and a live dashboard. Each person uses their own phone, and the dashboards update as the messages arrive.</p>
+  <ol class="steps">
+    <li><b>Order comes in</b><span>The buyer sends text or a voice note. AI picks out quantity, price and date, and flags what is unclear.</span><em class="who">Buyer</em></li>
+    <li><b>Price check</b><span>Exact decimal maths gives the floor price and shows what the women would earn per hour at the offer.</span><em class="who">Leader</em></li>
+    <li><b>Fair work plan</b><span>Tasks go to members by skill and free time, each with a reason. A declined task moves to someone else.</span><em class="who">Leader and members</em></li>
+    <li><b>Production and quality</b><span>The work is split into stages. The leader records which pieces passed and which need rework.</span><em class="who">Leader</em></li>
+    <li><b>Show-your-work pay slip</b><span>Each member sees pieces × rate in plain words, in Hindi or English, and can ask “Maine kitna kamaya, aur kyun?”</span><em class="who">Member</em></li>
+    <li><b>Group approves pay</b><span>Pay is settled only when the leader and enough members approve, and no dispute is open.</span><em class="who">Whole group</em></li>
+  </ol>
+</div></section>
+
+<section id="who" style="padding-top:0"><div class="wrap">
+  <h2>Everyone sees only what they need</h2>
+  <p class="sub">Privacy is built into each role, and the server enforces it on every request.</p>
+  <div class="scroll"><table>
+    <tr><th>Role</th><th>Who</th><th>Can see</th><th>Cannot see</th></tr>
+    <tr><td><b>Buyer</b></td><td>Places bulk orders</td><td>Own orders, the quote, status</td><td class="no">Costs, members, anyone’s pay</td></tr>
+    <tr><td><b>Member</b></td><td>SHG member such as Lakshmi</td><td>Own tasks and own earnings, with the working shown</td><td class="no">Other members’ pay</td></tr>
+    <tr><td><b>Leader</b></td><td>Group in-charge</td><td>The whole group: orders, plan, money, disputes</td><td class="no">Other groups</td></tr>
+    <tr><td><b>Mission officer</b></td><td>Federation or mission</td><td>Totals across groups, CSV export</td><td class="no">Names, phone numbers, individual earnings</td></tr>
+  </table></div>
+</div></section>
+
+<section style="padding-top:0"><div class="wrap">
+  <h2>Four rules we build by</h2>
+  <div class="rules" style="margin-top:22px">
+    <div class="rule"><b>People decide</b><span>The AI suggests. The group approves the price, the plan and the pay.</span></div>
+    <div class="rule"><b>Money maths is exact</b><span>Price and pay come from fixed, tested Decimal code, never from the AI.</span></div>
+    <div class="rule"><b>Honest records</b><span>Every action goes into a hash-chained ledger, so edits to history are detected.</span></div>
+    <div class="rule"><b>No false claims</b><span>We claim no income gains we haven’t measured.</span></div>
+  </div>
+</div></section>
+
+<section id="architecture"><div class="wrap">
+  <h2>How it is wired</h2>
+  <p class="sub">Real messages in, real decisions out. Nothing is simulated.</p>
+  <div class="arch">
+    <div class="node"><b>WhatsApp + Twilio</b><span>Real messages, voice notes and photos</span></div>
+    <div class="down" aria-hidden="true">↓</div>
+    <div class="node core"><b>Sakhi Khata backend</b><span>AI interpretation, pricing, allocation, quality workflow, permissions and ledger</span></div>
+    <div class="down" aria-hidden="true">↓</div>
+    <div class="pair"><div class="node"><b>Member WhatsApp</b><span>Tasks, updates, earnings and disputes</span></div><div class="node"><b>Web dashboards</b><span>Orders, approvals, progress and payouts</span></div></div>
+  </div>
+</div></section>
+
+<section class="try"><div class="wrap">
+  <h2>Start with one message</h2>
+  <p>Send a message on WhatsApp, then log in to your dashboard with the same phone number. A one-time code arrives on WhatsApp.</p>
+  <div class="cta"><a class="btn main wa" href="https://wa.me/">Start on WhatsApp</a><a class="btn" href="/app/login.html">Open the dashboards</a></div>
+</div></section>
+<footer>Sakhi Khata · a fair, talking ledger for Self-Help Groups.</footer>
+<script>fetch('/api/public').then(r=>r.json()).then(c=>{const n=(c.whatsapp||'').replace(/\D/g,'');document.querySelectorAll('a.wa').forEach(a=>a.href='https://wa.me/'+n+(c.join?'?text='+encodeURIComponent(c.join):''));if(c.join)document.getElementById('wahint').textContent='First time on the WhatsApp sandbox? Send "'+c.join+'" to '+c.whatsapp+'.'}).catch(()=>{})</script>
+</body>
+</html>

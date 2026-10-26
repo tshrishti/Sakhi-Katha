@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mission view - Sakhi Khata</title><link rel="stylesheet" href="style.css"></head><body><main id="m"></main><div id="toast"></div>
+<script src="common.js"></script><script>
+async function load(){const r=await api('/officer/summary');
+ $('#m').innerHTML=`<div class="card"><h2>SHG performance (aggregate only)</h2><table><tr><th>Group</th><th>Block</th><th>District</th><th>Orders</th><th>Settled</th><th>In progress</th><th>Underpriced offers</th><th>Open disputes</th><th>Flagged delays</th></tr>
+ ${r.map(x=>`<tr><td>${esc(x.group)}</td><td>${esc(x.block)}</td><td>${esc(x.district)}</td><td>${esc(x.orders)}</td><td>${esc(x.settled??'-')}</td><td>${esc(x.in_progress??'-')}</td><td class="${x.underpriced_offers?'warn':''}">${esc(x.underpriced_offers??'-')}</td><td class="${x.open_disputes?'bad':''}">${esc(x.open_disputes??'-')}</td><td class="${x.escalated_open?'bad':''}">${esc(x.escalated_open??'-')}</td></tr>`).join('')}</table>
+ <p class="muted">No member names, phone numbers or individual earnings are shown here. Groups with fewer than 3 orders show "&lt;3" to prevent identification.</p>
+ <div class="row"><a class="btn" href="/api/officer/export.csv">Download CSV</a><button onclick="api('/ledger/verify').then(v=>toast(v.valid?'Audit ledger intact ('+v.events+' events)':'TAMPERING at event '+v.broken_at,!v.valid))">Verify audit ledger</button></div></div>`}
+boot('officer','Mission / federation view').then(load);
+</script></body></html>

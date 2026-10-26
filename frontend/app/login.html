@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sakhi Khata - Dashboards</title><link rel="stylesheet" href="style.css">
+<style>.top{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}</style></head><body>
+<main style="max-width:520px;margin-top:6vh"><div class="card">
+<h2>SAKHI KHATA</h2>
+<p>Log in with your registered WhatsApp number. You will see the dashboard for your role.</p>
+<p class="muted">A one-time code is sent to you on WhatsApp. If it does not arrive, send "hi" to the Sakhi Khata WhatsApp number first and try again.</p>
+<div class="row"><input id="ph" placeholder="Phone, e.g. 9876543210" inputmode="tel"><button id="go">Send code</button></div>
+<div class="row" id="c2" style="display:none"><input id="code" placeholder="6-digit code" inputmode="numeric" maxlength="6"><button id="ok">Log in</button></div>
+<p class="muted" id="dev"></p>
+<div class="top"><a class="btn" href="/">What is Sakhi Khata?</a></div>
+</div></main><div id="toast"></div><script src="common.js"></script><script>
+$('#go').onclick=async()=>{try{const r=await api('/auth/request-otp','POST',{phone:$('#ph').value});$('#c2').style.display='flex';toast('If this number is registered, a code was sent on WhatsApp.');if(r.dev_code)$('#dev').textContent='DEV MODE code: '+r.dev_code}catch(e){toast(e.message,1)}};
+$('#ok').onclick=async()=>{try{const r=await api('/auth/verify','POST',{phone:$('#ph').value,code:$('#code').value});location=r.home}catch(e){toast(e.message,1)}};
+</script></body></html>

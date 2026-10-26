@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My work - Sakhi Khata</title><link rel="stylesheet" href="style.css"></head><body><main id="m"></main><div id="toast"></div>
+<script src="common.js"></script><script>
+async function load(){const [ts,es]=await Promise.all([api('/seller/tasks'),api('/seller/earnings')]);
+ $('#m').innerHTML=`<div class="card"><h2>My tasks</h2>${ts.length?`<table><tr><th>Order</th><th>Work</th><th>Pieces</th><th>Pay</th><th>Done</th><th>Why me</th><th></th></tr>${ts.map(t=>`<tr><td>#${t.order_id} ${chip(t.status)}</td><td>${esc(t.stage)}</td><td>${t.units}</td><td>Rs ${esc(t.expected_pay)}</td><td>${t.done}/${t.units}</td><td class="muted">${esc(t.why)}</td>
+ <td>${['accepted','planned'].includes(t.status)?`<button class="red" onclick="act('/seller/orders/${t.order_id}/decline','POST',{},load)">I cannot do this</button>`:t.status==='in_production'?`<button onclick="done(${t.order_id})">Add pieces done</button> <button onclick="act('/seller/orders/${t.order_id}/sample','POST',{note:''},load)">Send first sample</button>`:''}</td></tr>`).join('')}</table><p class="muted">Declining is never penalised.</p>`:'<p class="muted">No tasks right now.</p>'}</div>
+ <div class="card"><h2>My earnings - how it was calculated</h2>${es.length?es.map(e=>`<div class="row"><b>Order #${e.order_id}</b> ${chip(e.status)}</div><p>${esc(e.explain)}</p>
+ ${e.status==='payout_pending'?`<div class="row">${e.approved_by_me?'<span class="muted">You approved.</span>':`<button onclick="act('/seller/orders/${e.order_id}/payout/approve','POST',{},load)">This is correct</button>`}
+ <button class="red" onclick="dispute(${e.order_id})">I disagree</button></div>`:''}`).join('<hr>'):'<p class="muted">No earnings recorded yet.</p>'}</div>`}
+function done(id){const n=prompt('How many pieces did you finish?');if(n)act('/seller/orders/'+id+'/done','POST',{n:+n},load)}
+function dispute(id){const r=prompt('What is wrong? (the payment waits until the leader resolves it)');if(r)act('/seller/orders/'+id+'/dispute','POST',{reason:r},load)}
+boot('seller','My work and pay').then(load);
+</script></body></html>

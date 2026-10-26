@@ -1,0 +1,11 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Buyer - Sakhi Khata</title><link rel="stylesheet" href="style.css"></head><body><main id="m"></main><div id="toast"></div>
+<script src="common.js"></script><script>
+async function load(){const [gs,os]=await Promise.all([api('/buyer/groups'),api('/buyer/orders')]);
+ $('#m').innerHTML=`<div class="card"><h2>Place an order</h2><div class="row"><select id="g">${gs.map(g=>`<option value="${g.id}">${esc(g.name)} - ${esc(g.village)} (${g.orders_settled} orders delivered)</option>`).join('')}</select></div>
+ <textarea id="t" placeholder="e.g. 200 blue cloth bags, Rs 60 each, in 5 days"></textarea><div class="row"><button onclick="send()">Send order</button></div>
+ <p class="muted">You will see the group's quote and order status here. Worker details and costs stay private.</p></div>
+ <div class="card"><h2>My orders</h2>${os.length?`<table><tr><th>#</th><th>Order</th><th>Group</th><th>Status</th><th>Quote</th><th></th></tr>${os.map(o=>`<tr><td>${o.id}</td><td>${o.order.qty} pcs @ Rs ${o.order.offered_price}, ${o.order.deadline_days} days</td><td>${esc(o.group)}</td><td>${chip(o.status)}</td><td>${o.quote?'Rs '+esc(o.quote):'-'}</td>
+ <td>${o.status==='quoted'?`<button onclick="act('/buyer/orders/${o.id}/accept','POST',{},load)">Accept quote</button>`:''}</td></tr>`).join('')}</table>`:'<p class="muted">No orders yet.</p>'}</div>`}
+async function send(){try{const v=await api('/buyer/orders','POST',{group_id:+$('#g').value,text:$('#t').value});toast('Order sent'+(v.unclear.length?'. Please clarify: '+v.unclear.join('; '):''));load()}catch(e){toast(e.message,1)}}
+boot('buyer','Buyer dashboard').then(load);
+</script></body></html>
