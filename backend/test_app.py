@@ -103,8 +103,8 @@ def test_no_demo_surface_left(world):
     c = TestClient(world.app)
     for path in ("/api/config", "/api/demo", "/api/demo/state", "/live.html", "/3d.html"): assert c.get(path).status_code == 404
     for path in ("/api/auth/demo", "/api/demo/chat", "/api/demo/reset"): assert c.post(path, json={"role": "leader"}).status_code in (404, 405)
-    assert "demo" not in open("../frontend/app/login.html").read().lower() and "demo" not in open("../frontend/index.html").read().lower()
-
+    # assert "demo" not in open("../frontend/app/login.html").read().lower() and "demo" not in open("../frontend/index.html").read().lower()
+    assert "demo" not in open("../frontend/app/login.html", encoding="utf-8").read().lower() and "demo" not in open("../frontend/index.html", encoding="utf-8").read().lower()
 def test_owner_phone_is_bootstrapped_and_can_switch_role(world, monkeypatch):
     import db
     from sqlalchemy import select
