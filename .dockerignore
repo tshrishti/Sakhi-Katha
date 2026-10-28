@@ -1,0 +1,11 @@
+.env
+.git
+*.db
+__pycache__
+.pytest_cache
+.venv
+venv
+*.md
+start.sh
+start.bat
+render.yaml

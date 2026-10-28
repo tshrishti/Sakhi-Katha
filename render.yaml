@@ -1,0 +1,56 @@
+# Render Blueprint: New + -> Blueprint -> pick this repo. Creates the web service and a Postgres database, wired together.
+services:
+  - type: web
+    name: sakhi-khata
+    runtime: docker
+    plan: starter                 # free instances sleep after 15 min idle -> Twilio webhooks time out. Use starter or above for WhatsApp.
+    healthCheckPath: /readyz
+    autoDeploy: true
+    envVars:
+      - key: ENV
+        value: prod
+      - key: DATABASE_URL
+        fromDatabase: { name: sakhi-db, property: connectionString }
+      - key: SECRET_KEY
+        generateValue: true       # generated once by Render, kept across deploys
+      - key: CRON_SECRET
+        generateValue: true
+      # PUBLIC_URL is filled automatically from Render's RENDER_EXTERNAL_URL. Set it yourself only if you add a custom domain.
+      - key: GROQ_API_KEY
+        sync: false               # Render asks for these on first deploy; they are never stored in the repo
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        value: whatsapp:+14155238886
+      - key: SANDBOX_JOIN_PHRASE
+        sync: false
+      - key: OWNER_PHONE
+        sync: false
+      - key: OWNER_NAME
+        value: Owner
+      - key: OWNER_ROLE
+        value: leader
+      - key: GROUP_NAME
+        value: My SHG
+      - key: OPEN_REGISTRATION
+        value: "1"                # set to 0 once real members are added
+      - key: PAYOUT_MEMBER_QUORUM
+        value: "2"
+      - key: ESCALATION_MINUTES
+        value: "120"
+      - key: ENABLE_SCHEDULER     # in-process reminders every SCHEDULER_MINUTES; no separate cron service needed
+        value: "1"
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_STT_MODEL
+        value: whisper-large-v3
+      - key: GROQ_VISION_MODEL
+        value: meta-llama/llama-4-scout-17b-16e-instruct
+
+databases:
+  - name: sakhi-db
+    plan: basic-256mb             # the free Postgres plan expires after 30 days; do not use it for a ledger
+    databaseName: sakhi
+    user: sakhi

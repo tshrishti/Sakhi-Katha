@@ -5,15 +5,15 @@ The AI recommends and explains; the leader and the group decide. Nothing here se
 import datetime, re, time
 from decimal import Decimal as D
 from sqlalchemy import select
-import db, engine as E, i18n, llm, svc
+import db, engine as E, i18n, llm, screening, svc
 
 TTL = 2 * 3600                                           # a half-finished conversation is forgotten after 2 hours of silence
 GREET = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste", "namaskar", "menu", "start", "नमस्ते", "हेलो", "हाय", "मेनू"}
 STOP = {"cancel", "back", "exit", "stop", "reset"}
 YES, EDIT, NO = {"1", "confirm", "confirm order", "yes", "y", "ok", "okay", "haan", "ha", "हाँ", "हां"}, {"2", "edit", "edit details", "change", "badlo"}, {"3", "cancel", "cancel order", "no", "nahi", "nahin"}
 CMDS = {"buyer": {"status", "accept", "group", "help"},
-        "leader": {"orders", "quote", "plan", "start", "pass", "rework", "risk", "progress", "payout", "approve", "resolve", "accept", "help"},
-        "seller": {"tasks", "earnings", "done", "sample", "decline", "approve", "dispute", "help", "lang", "language"}}
+        "leader": {"orders", "quote", "plan", "start", "pass", "rework", "risk", "progress", "checklist", "payout", "approve", "resolve", "accept", "help"},
+        "seller": {"tasks", "earnings", "done", "sample", "checklist", "accept", "decline", "approve", "dispute", "help", "lang", "language"}}
 EARN_WORDS = ("kitna", "kamaya", "earnings", "paise", "earned", "कमाई", "कमाया")
 MENUS = {"buyer": [("new", "Place a new order"), ("check", "Check an existing order")],
          "leader": [("new", "Place a new order for a buyer"), ("check", "Check an existing order"), ("review", "Review orders waiting for me")],
@@ -21,7 +21,7 @@ MENUS = {"buyer": [("new", "Place a new order"), ("check", "Check an existing or
 WORDS = [("check", ("check", "status", "existing")), ("earn", ("earn", "kitna", "kamai", "paise", "pay")), ("work", ("work", "task", "kaam", "काम")),
          ("review", ("review", "manage", "pending")), ("new", ("order", "new", "place", "naya", "नया"))]
 STATUS = {"submitted": "waiting for the leader's quote", "quoted": "quote sent, waiting for the buyer", "accepted": "accepted, needs a work plan",
-          "planned": "work plan ready for approval", "in_production": "in production", "payout_pending": "payout waiting for approvals", "settled": "settled"}
+          "planned": "work plan ready for approval", "in_production": "in production", "payout_pending": "payout waiting for approvals", "settled": "paid, packing next", "ready_for_delivery": "packed, ready for delivery", "dispatched": "on the way, confirm when it arrives", "partially_delivered": "part delivered, rest still to come", "closed": "delivered and closed", "blocked": "on hold", "cancelled": "cancelled"}
 REQUIRED = [("product", "What product is it? (for example, cloth bags)", None), ("qty", "How many pieces do you need?", "{n} pieces"),
             ("offered_price", "What price per piece are you offering? (in ₹)", "Rs {n} per piece"), ("deadline_days", "By when do you need delivery? (a date, or a number of days)", "{n} days")]
 
@@ -160,6 +160,8 @@ def _pricing_block(r, offered):
     if off < floor: lines.append(f"⚠️ Shortfall: ₹{_money(floor - off)} per piece. At this price the women would earn about ₹{_money(D(p['effective_hourly_at_offer']))} an hour against a target of ₹{_money(D(p['target_hourly']))}.")
     else: lines.append("✅ The offer covers the minimum sustainable price.")
     lines.append("Delivery: " + ("✅ the group has the skills and capacity to deliver on time." if r["feasible"] else "⚠️ " + "; ".join(r["issues"])))
+    if not r["feasible"] and r.get("options"):
+        lines.append("Ways to make it work:"); lines += [f"{i}. {x['label']}" for i, x in enumerate(r["options"], 1)]
     return "\n".join(lines), off < floor, p["suggested_counter"]
 
 def _place(u, phone, d):
@@ -252,7 +254,10 @@ def _open(u, phone, oid, extra=""):
         acts[0] = ("quote_auto", f"Send a quote at ₹{sug} per piece")
     if v["status"] == "planned" and v.get("plan"):
         pl = v["plan"]; txt += "\n\nProposed work:\n" + "\n".join(f"{x['name']}: {x['stage']} × {x['units']} (₹{x['expected_pay']})" for x in pl["assignments"]) + ("\n⚠️ " + "; ".join(pl["issues"]) if pl["issues"] else "")
-    if v["status"] == "in_production" and any(x["status"] == "pending" for x in v.get("quality", [])): txt += "\n\nSamples are waiting for you. Send PASS <order> <name>, or REWORK <order> <name> <pieces> <reason>."
+    pend = [x for x in v.get("quality", []) if x["status"] == "pending"]
+    if v["status"] == "in_production" and pend:
+        txt += "\n\nSamples are waiting for you:\n" + "\n".join(f"{x['name']} ({x['stage']}): " + screening.describe(x.get("screening")) for x in pend)
+        txt += "\nSend PASS <order> <name>, or REWORK <order> <name> <pieces> <reason>. CHECKLIST <order> shows the buyer's checklist."
     return _go(phone, "review_act", {"oid": oid, "opts": [k for k, _ in acts], "auto": sug}, (extra + "\n\n" if extra else "") + txt + f"\n\nWhat would you like to do?\n{_opts(acts)}")
 
 def _step_review_pick(u, phone, st, t, w, media):
@@ -296,7 +301,7 @@ def _work(u, phone):
 
 ACT_STATUS = {"accept": ("planned", "in_production"), "done": ("in_production",), "sample": ("in_production",), "decline": ("accepted", "planned"), "issue": ("planned", "in_production", "accepted")}
 def _after_order(u, phone, act, oid):
-    if act == "accept": svc.accept_task(u, oid); _clear(phone); return f"✅ Thank you! You accepted your task in order #{oid}. The leader has been told. Send MENU for more options."
+    if act == "accept": svc.accept_task(u, oid); _clear(phone); return f"✅ " + i18n.t("task_accepted", u["lang"], o=oid) + " Send MENU for more options."
     if act == "decline": svc.decline(u, oid); _clear(phone); return i18n.t("declined", u["lang"]) + " Send MENU for more options."
     if act == "done": return _go(phone, "work_pieces", {"oid": oid}, f"How many pieces did you finish just now for order #{oid}?")
     if act == "sample": return _go(phone, "work_sample", {"oid": oid}, f"Please send a clear photo of your first finished piece for order #{oid}. You can add a short note with it.")

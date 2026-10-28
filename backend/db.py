@@ -5,7 +5,10 @@ import engine as E
 
 URL = os.getenv("DATABASE_URL") or "sqlite:///sakhi.db"
 if URL.startswith("postgres://"): URL = URL.replace("postgres://", "postgresql://", 1)
-engine = create_engine(URL, connect_args={"check_same_thread": False} if URL.startswith("sqlite") else {})
+if URL.startswith("postgresql://"): URL = URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+IS_SQLITE = URL.startswith("sqlite")
+engine = create_engine(URL, connect_args={"check_same_thread": False} if IS_SQLITE else {},
+                       **({} if IS_SQLITE else {"pool_pre_ping": True, "pool_recycle": 280, "pool_size": 5, "max_overflow": 5}))   # managed Postgres closes idle connections
 S = sessionmaker(engine, expire_on_commit=False)
 Base = declarative_base()
 
@@ -40,6 +43,14 @@ class Otp(Base):
 class Convo(Base):                     # where each WhatsApp number is in the guided conversation (survives restarts)
     __tablename__ = "convos"
     phone = Column(String, primary_key=True); step = Column(String); data = Column(JSON, default=dict); ts = Column(Float)
+
+class RateCard(Base):                  # per-group, versioned; status: proposed | active | superseded | rejected
+    __tablename__ = "rate_cards"
+    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False); product = Column(String, nullable=False)
+    version = Column(Integer, nullable=False); status = Column(String, nullable=False, default="proposed")
+    stages = Column(JSON, nullable=False); cost = Column(JSON, nullable=False); note = Column(String, default="")
+    leader_ok = Column(Boolean, default=False); member_ok = Column(JSON, default=list)
+    created = Column(Float); approved_at = Column(Float)
 
 class DBLedger:
     """Persistent, append-only, hash-chained audit log. Same chain rules as engine.Ledger."""

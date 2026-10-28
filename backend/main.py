@@ -1,5 +1,5 @@
 import envload  # noqa: F401  (loads .env before anything reads the environment)
-import base64, csv, hmac, io, os, pathlib
+import asyncio, base64, contextlib, csv, hmac, io, logging, os, pathlib
 from xml.sax.saxutils import escape
 from sqlalchemy import select
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -7,9 +7,32 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 import auth, bootstrap, bot, db, media as mediafetch, svc, voice
 
+log = logging.getLogger("sakhi")
 DEV = auth.DEV
 bootstrap.ensure()                                       # tables + the SHG group + the owner phone from .env
-app = FastAPI(title="Sakhi Khata", docs_url="/docs" if DEV else None, redoc_url=None, openapi_url="/openapi.json" if DEV else None)
+if not DEV and db.IS_SQLITE:
+    log.warning("DATABASE_URL is not set: using local SQLite. On Render this is wiped on every deploy. Attach a Postgres database.")
+if not DEV and not os.getenv("PUBLIC_URL"):
+    log.warning("PUBLIC_URL is not set: Twilio webhook signature checks will fail and login cookies will not be Secure.")
+
+SCHED_MIN = int(os.getenv("SCHEDULER_MINUTES", "15"))   # in-process reminder loop; set ENABLE_SCHEDULER=0 to use an external cron instead
+async def _scheduler():
+    await asyncio.sleep(60)                              # let the app finish starting
+    while True:
+        try:
+            r = await asyncio.to_thread(svc.run_reminders); e = await asyncio.to_thread(svc.escalate_overdue)
+            log.info("scheduler: reminders=%s escalated=%s", r, e)
+        except Exception:
+            log.exception("scheduler run failed")
+        await asyncio.sleep(max(1, SCHED_MIN) * 60)
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(_scheduler()) if os.getenv("ENABLE_SCHEDULER", "1") == "1" and not DEV else None
+    yield
+    if task: task.cancel()
+
+app = FastAPI(title="Sakhi Khata", lifespan=lifespan, docs_url="/docs" if DEV else None, redoc_url=None, openapi_url="/openapi.json" if DEV else None)
 HOME = {"buyer": "/app/buyer.html", "seller": "/app/seller.html", "leader": "/app/leader.html", "officer": "/app/officer.html"}
 
 @app.middleware("http")
@@ -21,7 +44,15 @@ async def security_headers(request: Request, call_next):
 @app.exception_handler(svc.Err)
 async def svc_err(request, e): return JSONResponse({"detail": e.msg}, status_code=e.code)
 @app.get("/healthz")
-def healthz(): return {"ok": True}
+def healthz(): return {"ok": True}                           # liveness: process is up (no DB call)
+@app.get("/readyz")
+def readyz():                                                 # readiness: database reachable
+    from sqlalchemy import text
+    try:
+        with db.engine.connect() as c: c.execute(text("SELECT 1"))
+    except Exception:
+        return JSONResponse({"ok": False, "db": "down"}, status_code=503)
+    return {"ok": True, "db": "up"}
 
 @app.get("/api/public")
 def public():                                                  # only what the landing page needs to point people at the WhatsApp number
@@ -50,6 +81,8 @@ def consent(u=Depends(auth.require())): return svc.consent(u)
 
 # ---- buyer ----
 B = Depends(auth.require("buyer"))
+@app.get("/api/products")
+def products(): return svc.products()
 @app.get("/api/buyer/groups")
 def b_groups(u=B): return svc.groups()
 @app.post("/api/buyer/orders")
@@ -58,6 +91,13 @@ def b_submit(b: dict, u=B): return svc.submit_order(u, int(b.get("group_id", 0))
 def b_orders(u=B): return svc.my_orders(u)
 @app.post("/api/buyer/orders/{oid}/accept")
 def b_accept(oid: int, u=B): return svc.accept_quote(u, oid)
+
+@app.post("/api/buyer/orders/{oid}/signoff")
+def b_signoff(oid: int, b: dict, u=B): return svc.signoff(u, oid, b.get("received"), b.get("note", ""), bool(b.get("final")))
+@app.post("/api/buyer/orders/{oid}/cancel")
+def b_cancel(oid: int, b: dict, u=B): return svc.cancel(u, oid, b.get("reason", ""))
+@app.get("/api/buyer/orders/{oid}/delivery/{i}/photo")
+def b_dphoto(oid: int, i: int, u=B): return _img(svc.delivery_photo_get(u, oid, i))
 
 # ---- leader ----
 L = Depends(auth.require("leader"))
@@ -81,13 +121,46 @@ def l_quality(oid: int, b: dict, u=L): return svc.review_sample(u, oid, b.get("m
 def l_risk(oid: int, b: dict, u=L): return svc.risk(u, oid, b.get("days_left"))
 @app.get("/api/leader/orders/{oid}/quality/{i}/photo")
 def l_photo(oid: int, i: int, u=L): return _img(svc.photo(u, oid, i))
+@app.post("/api/leader/orders/{oid}/quality/{i}/rescreen")
+def l_rescreen(oid: int, i: int, u=L): return svc.rescreen(u, oid, i)
+@app.get("/api/leader/orders/{oid}/checklist")
+def l_checklist(oid: int, u=L): return svc.get_checklist(u, oid)
+@app.put("/api/leader/orders/{oid}/checklist")
+def l_set_checklist(oid: int, b: dict, u=L): return svc.set_checklist(u, oid, b.get("items", []))
+@app.post("/api/leader/orders/{oid}/ready")
+def l_ready(oid: int, b: dict, u=L): return svc.mark_ready(u, oid, b.get("counted"), b.get("note", ""))
+@app.post("/api/leader/orders/{oid}/dispatch")
+def l_dispatch(oid: int, b: dict, u=L): return svc.dispatch(u, oid, b.get("courier"), b.get("tracking", ""), b.get("date", ""), b.get("note", ""))
+@app.post("/api/leader/orders/{oid}/delivery-photo")
+def l_dphoto(oid: int, b: dict, u=L): return svc.delivery_photo(u, oid, b.get("photo"))
+@app.get("/api/leader/orders/{oid}/delivery/{i}/photo")
+def l_dphoto_get(oid: int, i: int, u=L): return _img(svc.delivery_photo_get(u, oid, i))
+@app.post("/api/leader/orders/{oid}/block")
+def l_block(oid: int, b: dict, u=L): return svc.block(u, oid, b.get("reason"))
+@app.post("/api/leader/orders/{oid}/unblock")
+def l_unblock(oid: int, b: dict, u=L): return svc.unblock(u, oid, b.get("note", ""))
+@app.post("/api/leader/orders/{oid}/cancel")
+def l_cancel(oid: int, b: dict, u=L): return svc.cancel(u, oid, b.get("reason", ""))
 @app.get("/api/leader/members")
 def l_members(u=L): return svc.members(u)
 @app.post("/api/leader/members")
 def l_add(b: dict, u=L): return svc.add_member(u, b.get("phone", ""), b.get("name", ""), b.get("skills", []), b.get("capacity", 0))
 
+@app.get("/api/leader/ratecards")
+def l_rc(u=L): return svc.ratecards_list(u)
+@app.post("/api/leader/ratecards")
+def l_rc_propose(b: dict, u=L): return svc.propose_ratecard(u, str(b.get("product", "")), b.get("stages"), b.get("cost"), b.get("note", ""))
+@app.post("/api/leader/ratecards/{cid}/approve")
+def l_rc_ok(cid: int, u=L): return svc.approve_ratecard(u, cid)
+@app.post("/api/leader/ratecards/{cid}/reject")
+def l_rc_no(cid: int, u=L): return svc.reject_ratecard(u, cid)
+
 # ---- seller (SHG member) ----
 M = Depends(auth.require("seller"))
+@app.get("/api/seller/ratecards")
+def s_rc(u=M): return svc.ratecards_list(u)
+@app.post("/api/seller/ratecards/{cid}/approve")
+def s_rc_ok(cid: int, u=M): return svc.approve_ratecard(u, cid)
 @app.get("/api/seller/tasks")
 def s_tasks(u=M): return svc.tasks(u)
 @app.get("/api/seller/earnings")
@@ -96,6 +169,10 @@ def s_earn(u=M): return svc.earnings(u)
 def s_done(oid: int, b: dict, u=M): return svc.report_done(u, oid, b.get("n"))
 @app.post("/api/seller/orders/{oid}/sample")
 def s_sample(oid: int, b: dict, u=M): return svc.submit_sample(u, oid, str(b.get("note", ""))[:200], b.get("photo"))
+@app.get("/api/seller/orders/{oid}/checklist")
+def s_checklist(oid: int, u=M): return svc.get_checklist(u, oid)
+@app.post("/api/seller/orders/{oid}/accept")
+def s_accept(oid: int, u=M): return svc.accept_task(u, oid)
 @app.post("/api/seller/orders/{oid}/decline")
 def s_decline(oid: int, u=M): return svc.decline(u, oid)
 @app.post("/api/seller/orders/{oid}/payout/approve")
@@ -112,14 +189,18 @@ def _img(data_url):
 def o_summary(u=Depends(auth.require("officer"))): return svc.officer_summary()
 @app.get("/api/officer/export.csv")
 def o_export(u=Depends(auth.require("officer"))):
-    rows = svc.officer_summary(); out = io.StringIO(); w = csv.DictWriter(out, ["group", "block", "district", "orders", "settled", "in_progress", "underpriced_offers", "open_disputes", "escalated_open"])
+    rows = svc.officer_summary(); out = io.StringIO(); w = csv.DictWriter(out, ["group", "block", "district", "orders", "settled", "in_progress", "in_delivery", "closed", "blocked", "cancelled", "underpriced_offers", "open_disputes", "escalated_open"])
     w.writeheader(); [w.writerow(r) for r in rows]
     return Response(out.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=sakhi_khata_summary.csv"})
-@app.post("/api/cron/escalate")
-def cron_escalate(request: Request):                       # call from a scheduler (Railway cron, cron-job.org): header X-Cron-Secret
+def _cron_auth(request):                                    # call from a scheduler (Railway cron, cron-job.org): header X-Cron-Secret
     sec = os.getenv("CRON_SECRET", "")
     if not sec or not hmac.compare_digest(request.headers.get("X-Cron-Secret", ""), sec): raise HTTPException(404, "Not found")
-    return {"raised": svc.escalate_overdue()}
+@app.post("/api/cron/escalate")
+def cron_escalate(request: Request):
+    _cron_auth(request); return {"raised": svc.escalate_overdue()}
+@app.post("/api/cron/reminders")
+def cron_reminders(request: Request):                       # one endpoint for every scheduled reminder: task due, deadline risk, sample review, payout approval, escalation
+    _cron_auth(request); return svc.run_reminders()
 @app.get("/api/ledger/verify")
 def ledger_verify(u=Depends(auth.require("leader", "officer"))): return svc.LED.verify()
 

@@ -10,3 +10,8 @@ textarea{width:100%;min-height:80px}table{width:100%;border-collapse:collapse}td
 .muted{opacity:.7;font-size:13px}.warn{color:#ffb020}.bad{color:#ff5d73}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#06201a;border:1px solid #5dffc4;padding:10px 18px;border-radius:12px;display:none;z-index:9}
 .modal{position:fixed;inset:0;background:#000b;display:grid;place-items:center;z-index:20}.modal .card{max-width:440px}
+.ai{border-left:3px solid #ffd36b;margin:4px 0 10px;padding:4px 10px;background:#06201a;border-radius:0 8px 8px 0}.ai ul{margin:4px 0;padding-left:18px}
+.conf{padding:1px 8px;border-radius:999px;font-size:11px;background:#14594a}.conf.high{background:#8a1f2e}.conf.medium{background:#8a5a00}
+details.cl{margin-top:10px}details summary{cursor:pointer}
+
+.chip.ready_for_delivery,.chip.dispatched{background:#1f5fae}.chip.partially_delivered{background:#8a5a00}.chip.closed{background:#1a7f37}.chip.blocked{background:#a33}.chip.cancelled{background:#555}

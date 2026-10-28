@@ -2,6 +2,7 @@
 The LLM never touches these numbers. It only extracts, plans and explains."""
 from decimal import Decimal as D, ROUND_HALF_UP
 import hashlib, json, re, time
+import defaults
 
 def q(x):
     return D(x).quantize(D("0.01"), rounding=ROUND_HALF_UP)
@@ -9,7 +10,7 @@ def q(x):
 # ---------- 1. messy order -> structured order (rule-based fallback; plug an LLM in here) ----------
 def parse_order(text):
     t = text.lower()
-    qty = re.search(r"(\d+)\s*(?:bags?|pieces?|pcs)", t)
+    qty = re.search(r"(\d+)\s*(?:" + "|".join(defaults.UNIT_WORDS) + r")\b", t)
     price = re.search(r"(?:rs\.?|₹|rupees?)\s*(\d+)", t) or re.search(r"(\d+)\s*(?:rs|rupees?|rupaye)", t)
     days = re.search(r"(\d+)\s*(?:days?|din)", t)
     week = re.search(r"week|hafte", t)
@@ -67,6 +68,40 @@ def allocate(units, stages, members, days=5, history=None, declined=()):
             issues.append(f"{m['name']} needs {q(load[m['id']])} days of work but has {days}")
     return {"assignments": out, "feasible": not issues, "issues": issues,
             "load_days": {m["name"]: str(q(load[m["id"]])) for m in members}}
+
+# ---------- 3b. feasibility gate with options ----------
+RUSH_PREMIUM_PCT = 10   # extra per piece when the group must stretch to hit a tight deadline
+
+def _ok(units, stages, members, days, declined=()):
+    return units > 0 and days > 0 and allocate(units, stages, members, days=days, declined=declined)["feasible"]
+
+def feasibility_options(units, stages, members, days, floor, offered, declined=()):
+    """When an order is not viable, offer ways to make it viable instead of just saying no.
+    Returns a list of {kind, label, ...} options, best first. Pure and deterministic; the leader decides."""
+    units, days, floor, offered = int(units), int(days), D(str(floor)), D(str(offered))
+    if _ok(units, stages, members, days, declined): return []
+    skills = {s for m in members if m["id"] not in declined for s in m["skills"]}
+    missing = [st["name"] for st in stages if st["name"] not in skills]
+    if missing:
+        return [{"kind": "recruit", "label": f"Nobody available has the {', '.join(missing)} skill. Recruit or train a member first; changing price, quantity or date will not fix this."}]
+    opts = []
+    lo, hi = 0, units                                   # largest quantity doable by the deadline
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if _ok(mid, stages, members, days, declined) else (lo, mid - 1)
+    if lo > 0:
+        opts.append({"kind": "smaller_quantity", "qty": lo, "remaining": units - lo, "deadline_days": days,
+                     "label": f"Take {lo} pieces by day {days} and deliver the other {units - lo} in a second batch"})
+    d = days + 1                                        # earliest deadline that fits the full quantity
+    while d <= days + 365 and not _ok(units, stages, members, d, declined): d += 1
+    if d <= days + 365:
+        opts.append({"kind": "later_deadline", "deadline_days": d, "qty": units,
+                     "label": f"Ask the buyer for {d} days instead of {days} ({d - days} more) to deliver all {units} pieces"})
+    base = max(floor, offered)
+    price = ((base * (1 + D(RUSH_PREMIUM_PCT) / 100)) / 5).to_integral_value(rounding="ROUND_CEILING") * 5
+    opts.append({"kind": "revised_price", "price": str(price), "qty": units, "deadline_days": days,
+                 "label": f"Keep {units} pieces in {days} days but quote Rs {price} per piece (includes a {RUSH_PREMIUM_PCT}% rush premium for stretching the group)"})
+    return opts
 
 # ---------- 4. deadline rescue ----------
 def rescue(done, needed, per_day, days_left):
