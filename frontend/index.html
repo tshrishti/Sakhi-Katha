@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -113,14 +113,16 @@ footer{padding:26px 0;text-align:center;color:var(--muted);font-size:14px;border
 <nav><div class="wrap">
   <a class="logo" href="/">Sakhi Khata</a>
   <a class="l" href="#problem">The problem</a><a class="l" href="#how">How it works</a><a class="l" href="#who">Who sees what</a>
-  <a class="btn main" href="/app/login.html">Dashboard login</a>
+  <a class="btn main" href="/app/">Dashboard login</a>
 </div></nav>
 
 <header class="hero"><div class="wrap">
   <div>
     <h1>From a WhatsApp voice note to a pay slip every woman can understand.</h1>
+    <!-- Dashboard button added after the headline -->
+    <p><a href="/app/" style="display:inline-block;padding:11px 22px;border-radius:999px;background:#5dffc4;color:#032018;font-weight:700;text-decoration:none;margin:0 0 18px">Open dashboard →</a></p>
     <p class="lede"><b>Sakhi Khata</b> is a talking ledger for women’s Self-Help Groups. It turns a messy bulk order into a clear order, a fair price, a fair work plan and a pay slip that shows exactly how the money was worked out. It works inside the WhatsApp the group already uses.</p>
-    <div class="cta"><a class="btn main wa" href="https://wa.me/">Start on WhatsApp</a><a class="btn" href="/app/login.html">Open the dashboards</a></div>
+    <div class="cta"><a class="btn main wa" href="https://wa.me/">Start on WhatsApp</a><a class="btn" href="/app/">Open the dashboards</a></div>
     <p class="muted wahint" id="wahint"></p>
     <p class="promise">The AI suggests and explains. The group decides.</p>
   </div>
@@ -200,7 +202,7 @@ footer{padding:26px 0;text-align:center;color:var(--muted);font-size:14px;border
 <section class="try"><div class="wrap">
   <h2>Start with one message</h2>
   <p>Send a message on WhatsApp, then log in to your dashboard with the same phone number. A one-time code arrives on WhatsApp.</p>
-  <div class="cta"><a class="btn main wa" href="https://wa.me/">Start on WhatsApp</a><a class="btn" href="/app/login.html">Open the dashboards</a></div>
+  <div class="cta"><a class="btn main wa" href="https://wa.me/">Start on WhatsApp</a><a class="btn" href="/app/">Open the dashboards</a></div>
 </div></section>
 <footer>Sakhi Khata · a fair, talking ledger for Self-Help Groups.</footer>
 <script>fetch('/api/public').then(r=>r.json()).then(c=>{const n=(c.whatsapp||'').replace(/\D/g,'');document.querySelectorAll('a.wa').forEach(a=>a.href='https://wa.me/'+n+(c.join?'?text='+encodeURIComponent(c.join):''));if(c.join)document.getElementById('wahint').textContent='First time on the WhatsApp sandbox? Send "'+c.join+'" to '+c.whatsapp+'.'}).catch(()=>{})</script>

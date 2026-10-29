@@ -506,7 +506,7 @@ def test_reminders_need_secret_and_return_all_types(world, monkeypatch):
     c = TestClient(world.app); assert c.post("/api/cron/reminders").status_code == 404
     monkeypatch.setenv("CRON_SECRET", "s3cret")
     r = c.post("/api/cron/reminders", headers={"X-Cron-Secret": "s3cret"}).json()
-    assert set(r) == {"task_due", "deadline_risk", "sample_review", "payout_approval", "escalated"}
+    assert set(r) == {"task_due", "deadline_risk", "sample_review", "payout_approval", "stale", "payment_due", "escalated"}
 
 def test_task_due_and_deadline_risk_use_the_real_delivery_date(world):
     l, oid = _in_production(world); o = next(x for x in orders(world) if x["id"] == oid)

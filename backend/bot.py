@@ -2,12 +2,12 @@
 Like MaaSakhi: short messages, the number identifies the user, language is chosen on first contact, photos and voice notes work.
 Unknown numbers get nothing unless OPEN_REGISTRATION=1 (then they register themselves like in MaaSakhi); otherwise the leader adds members."""
 from sqlalchemy import select
-import auth, bootstrap, convo, db, i18n, svc
+import auth, bootstrap, convo, db, hub, i18n, ops, svc
 
 SEEN, PREF, ONB = set(), {}, {}
 SKILLS = {"1": "cutting", "2": "stitching", "3": "finishing", "4": "packing"}
-HELP = {"buyer": "Send your order as text or voice (quantity, price per piece, days). STATUS lists orders. ACCEPT <id> accepts a quote. RECEIVED <id> <pieces> confirms delivery (add FINAL to accept a shortfall). CANCEL <id> before work starts. LANG 1/2/3 changes language.",
-        "leader": "ORDERS, QUOTE <id> [price], PLAN <id>, START <id>, PASS <id> <name>, REWORK <id> <name> <pieces> <reason>, RISK <id> [days left], PROGRESS <id>, CHECKLIST <id>, PAYOUT <id> [name rework-count], APPROVE <id>, RESOLVE <id> <note>, READY <id> <packed pieces>, DISPATCH <id> <courier> [tracking], BLOCK <id> <reason>, UNBLOCK <id>, CANCEL <id> <reason>."}
+HELP = {"buyer": "Send your order as text or voice (quantity, price per piece, days). STATUS lists orders. ACCEPT <id> accepts a quote. RECEIVED <id> <pieces> confirms delivery (add FINAL to accept a shortfall). RATE <id> <1-5> rates the group after delivery. CANCEL <id> before work starts. LANG 1/2/3 changes language.",
+        "leader": "TODAY (what needs you), ORDERS, QUOTE <id> [price], PLAN <id>, START <id>, PASS <id> <name>, REWORK <id> <name> <pieces> <reason>, RISK <id> [days left], PROGRESS <id>, CHECKLIST <id>, PAYOUT <id> [name rework-count], APPROVE <id>, RESOLVE <id> <note>, READY <id> <packed pieces>, DISPATCH <id> <courier> [tracking], BLOCK <id> <reason>, UNBLOCK <id>, CANCEL <id> <reason>, PAID <id> <rupees>, REMIND <id>, DUE, NOTE <id> <text>, TEAM, MSG <name or all> <text>, REASSIGN <id> <from> <to> <pieces> [stage], FIXED <id> [note], STOCK."}
 
 def _id(w):
     try: return int(w[1])
@@ -18,6 +18,18 @@ def _fmt(v):
     return f"#{v['id']} {v['order']['qty']} pcs Rs {v['order']['offered_price']} [{_st(v)}]" + (f" quote Rs {v['quote']}" if v.get("quote") else "") + extra
 def _mine(u, oid): return next((x for x in svc.my_orders(u) if x["id"] == oid), None)
 
+def _member_id(u, word):
+    word = word.lower()
+    for m in svc.members(u):
+        if m["name"].lower() == word or m["name"].lower().split()[0] == word: return m["id"]
+    raise svc.Err(404, f"No member called {word}")
+def _today(u):
+    """The same list the dashboard shows under 'Needs your decision': one workflow, two surfaces."""
+    with db.S() as s: needs = hub.Ctx(s, u).needs
+    if not needs: return "Nothing needs you right now. Everything is on track."
+    lines = [f"{i}. {a['title']}" + (f"\n   Send: {a['cmd']}" if a["cmd"] else "") for i, a in enumerate(needs[:6], 1)]
+    return f"{len(needs)} item(s) need you:\n" + "\n".join(lines) + (f"\n...and {len(needs) - 6} more on the dashboard." if len(needs) > 6 else "")
+
 def _buyer(u, t, w, media):
     c = w[0] if w else ""
     if c == "status": return "\n".join(_fmt(v) for v in svc.my_orders(u)) or "No orders yet."
@@ -25,7 +37,10 @@ def _buyer(u, t, w, media):
     if c == "received":
         if len(w) < 3 or not w[2].isdigit(): raise svc.Err(422, "Send RECEIVED <order> <pieces that arrived>, e.g. RECEIVED 12 190")
         v = svc.signoff(u, _id(w), w[2], " ".join(t.split()[3:]), "final" in w[3:]); d = v["delivery"]
-        return f"Thank you. Order #{v['id']}: {d['delivered']} of {d['ordered']} pieces received. Status: {_st(v)}."
+        return f"Thank you. Order #{v['id']}: {d['delivered']} of {d['ordered']} pieces received. Status: {_st(v)}." + (f"\nHow did the group do? Send RATE {v['id']} <1 to 5>." if v["status"] == "closed" else "")
+    if c == "rate":
+        if len(w) < 3 or not w[2].isdigit(): raise svc.Err(422, "Send RATE <order> <1 to 5>, e.g. RATE 12 5")
+        ops.rate_group(u, _id(w), w[2], " ".join(t.split()[3:])); return "Thank you for rating the group!"
     if c == "cancel": v = svc.cancel(u, _id(w), " ".join(t.split()[2:])); return f"Order #{v['id']} cancelled."
     if c == "group": PREF[u["id"]] = _id(w); return "Group selected."
     if (len(w) == 1 and c in ("help", "hi", "hello", "namaste")) or not t: return HELP["buyer"]
@@ -83,8 +98,41 @@ def _leader(u, t, w, media):
     if c == "resolve":
         oid = _id(w); o = _mine(u, oid)
         i = next((k for k, d in enumerate((o or {}).get("disputes", [])) if d["open"]), None)
-        if i is None: return "No open dispute on that order."
+        if i is None:
+            with db.S() as s: iss = [x for x in (s.get(db.Order, oid).data.get("issues", []) if s.get(db.Order, oid) else []) if x.get("open")]
+            if iss: ops.resolve_issue(u, oid, iss[0]["i"], " ".join(t.split()[2:])); return "Problem marked as sorted. The member has been told."
+            return "No open dispute or problem on that order."
         v = svc.resolve_dispute(u, oid, i, " ".join(t.split()[2:]) or "resolved by leader"); return f"Dispute resolved. Order status: {_st(v)}."
+    if c in ("today", "alerts"): return _today(u)
+    if c == "paid":
+        if len(w) < 3: raise svc.Err(422, "Send PAID <order> <rupees>, e.g. PAID 12 5000")
+        m = ops.record_payment(u, _id(w), w[2].replace(",", ""), None, "whatsapp", " ".join(t.split()[3:])); return f"Recorded Rs {w[2]}. Paid so far Rs {m['paid']} of Rs {m['total']}. Balance Rs {m['balance']}."
+    if c == "remind": r = ops.remind_buyer(u, _id(w)); return f"Reminder sent to the buyer for the balance of Rs {r['balance']}."
+    if c == "due":
+        with db.S() as s: rows = [x for x in hub.payouts_view(hub.Ctx(s, u))["money_in"] if float(x["balance"]) > 0]
+        return "\n".join(f"#{x['order_id']} {x['buyer']}: Rs {x['balance']} due" + (f" ({x['days_overdue']} days overdue)" if x["overdue"] else "") for x in rows) or "No buyer owes the group anything right now."
+    if c == "note":
+        if len(w) < 3: raise svc.Err(422, "Send NOTE <order> <your private note>")
+        ops.add_note(u, _id(w), " ".join(t.split()[2:])); return "Private note saved on the order."
+    if c == "team":
+        with db.S() as s: ms = hub.team_view(hub.Ctx(s, u))["members"]
+        return "\n".join(f"{m['name']}: {m['status']}" + (f" ({'; '.join(m['status_reasons'])})" if m["status_reasons"] else "") for m in ms if m["active"]) or "No members yet."
+    if c == "msg":
+        if len(w) < 3: raise svc.Err(422, "Send MSG <member name or ALL> <message>")
+        to = "all" if w[1] == "all" else _member_id(u, w[1]); r = ops.send_message(u, to, " ".join(t.split()[2:])); return f"Message sent to {len(r['results'])} member(s): " + ", ".join(f"{x['name']} {x['status'].replace('_', ' ')}" for x in r["results"])
+    if c == "reassign":
+        if len(w) < 5 or not w[4].isdigit(): raise svc.Err(422, "Send REASSIGN <order> <from name> <to name> <pieces> [stage]")
+        oid = _id(w); o = _mine(u, oid); fid, tid = _member_id(u, w[2]), _member_id(u, w[3])
+        stg = w[5] if len(w) > 5 else next((a["stage"] for a in ((o or {}).get("plan") or {}).get("assignments", []) if a["member"] == fid), "")
+        ops.reassign(u, oid, fid, tid, stg, w[4]); return f"Moved {w[4]} {stg} pieces from {w[2].title()} to {w[3].title()}. Both have been told."
+    if c == "fixed":
+        oid = _id(w)
+        with db.S() as s: iss = [x for x in (s.get(db.Order, oid).data.get("issues", []) if s.get(db.Order, oid) else []) if x.get("open")]
+        if not iss: return "No open problem reported on that order."
+        ops.resolve_issue(u, oid, iss[0]["i"], " ".join(t.split()[2:])); return "Marked as sorted. The member has been told."
+    if c == "stock":
+        with db.S() as s: v = hub.materials_view(hub.Ctx(s, u))
+        return "\n".join(f"{m['name']}: {m['qty']:g} {m['unit']}" for m in v["materials"]) + ("\nShort: " + ", ".join(f"{x['name']} {x['short']:g}" for x in v["shopping"]) if v["shopping"] else "") if v["materials"] else "No materials tracked yet. Add them on the dashboard (Materials tab)."
     return HELP["leader"]
 
 def _seller(u, t, w, media):
@@ -104,6 +152,9 @@ def _seller(u, t, w, media):
     if c == "sample":
         oid = int(w[1]) if len(w) > 1 and w[1].isdigit() else next((x["order_id"] for x in svc.tasks(u) if x["status"] == "in_production"), 0)
         svc.submit_sample(u, oid, " ".join(t.split()[2:]) if len(w) > 1 and w[1].isdigit() else " ".join(t.split()[1:])); return i18n.t("sample_ok", L, o=oid, photo="")
+    if c == "issue":
+        if len(w) < 3 or not w[1].isdigit(): raise svc.Err(422, "Send ISSUE <order> <what is wrong>, e.g. ISSUE 1 need more thread")
+        svc.report_issue(u, int(w[1]), " ".join(t.split()[2:])); return "I have told your leader. She will decide what to do next."
     if c == "checklist": return _checklist(u, w, t)
     if c == "accept": r = svc.accept_task(u, _id(w)); return i18n.t("task_accepted", L, o=_id(w))
     if c == "decline": svc.decline(u, _id(w)); return i18n.t("declined", L)

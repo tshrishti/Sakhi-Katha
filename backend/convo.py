@@ -11,9 +11,10 @@ TTL = 2 * 3600                                           # a half-finished conve
 GREET = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste", "namaskar", "menu", "start", "नमस्ते", "हेलो", "हाय", "मेनू"}
 STOP = {"cancel", "back", "exit", "stop", "reset"}
 YES, EDIT, NO = {"1", "confirm", "confirm order", "yes", "y", "ok", "okay", "haan", "ha", "हाँ", "हां"}, {"2", "edit", "edit details", "change", "badlo"}, {"3", "cancel", "cancel order", "no", "nahi", "nahin"}
-CMDS = {"buyer": {"status", "accept", "group", "help"},
-        "leader": {"orders", "quote", "plan", "start", "pass", "rework", "risk", "progress", "checklist", "payout", "approve", "resolve", "accept", "help"},
-        "seller": {"tasks", "earnings", "done", "sample", "checklist", "accept", "decline", "approve", "dispute", "help", "lang", "language"}}
+CMDS = {"buyer": {"status", "accept", "group", "help", "received", "cancel", "rate"},
+        "leader": {"orders", "quote", "plan", "start", "pass", "rework", "risk", "progress", "checklist", "payout", "approve", "resolve", "accept", "help",
+                   "ready", "dispatch", "block", "unblock", "cancel", "today", "alerts", "paid", "remind", "note", "team", "msg", "reassign", "fixed", "stock", "due"},
+        "seller": {"tasks", "earnings", "done", "sample", "checklist", "accept", "decline", "approve", "dispute", "help", "lang", "language", "issue"}}
 EARN_WORDS = ("kitna", "kamaya", "earnings", "paise", "earned", "कमाई", "कमाया")
 MENUS = {"buyer": [("new", "Place a new order"), ("check", "Check an existing order")],
          "leader": [("new", "Place a new order for a buyer"), ("check", "Check an existing order"), ("review", "Review orders waiting for me")],
@@ -171,7 +172,7 @@ def _place(u, phone, d):
     v = svc.submit_order(u, g[0]["id"], "\n".join(d["parts"]), pre={"order": o, "unclear": d.get("unclear", []), "evidence": d.get("evidence")})
     if u["role"] != "leader":
         _clear(phone)
-        return f"✅ Order #{v['id']} is confirmed and sent to {v['group']}.\n\nThe SHG leader will check the price and the work plan, and you will get a quote here. Send STATUS or MENU any time."
+        return f"✅ Order #{v['id']} is confirmed and sent to {v['group']}.\n\nThe SHG leader will check the price and the work plan, and you will get a quote here. Send STATUS or MENU any time.\n\nPrivacy: only the group leader can see your phone number."
     r = svc.review(u, v["id"]); block, under, counter = _pricing_block(r, o["offered_price"])
     opts = ([("quote_auto", f"Send a counteroffer of ₹{counter} per piece")] if under else [("quote_auto", f"Accept the offered price (send quote ₹{o['offered_price']})")]) + [("quote_own", "Send a quote at my own price"), ("later", "Review it later")]
     return _go(phone, "after_submit", {"oid": v["id"], "opts": [k for k, _ in opts], "auto": str(counter if under else o["offered_price"])},

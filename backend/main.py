@@ -5,7 +5,7 @@ from sqlalchemy import select
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-import auth, bootstrap, bot, db, media as mediafetch, svc, voice
+import auth, bootstrap, bot, db, hub, media as mediafetch, ops, svc, voice, workflow
 
 log = logging.getLogger("sakhi")
 DEV = auth.DEV
@@ -94,6 +94,8 @@ def b_accept(oid: int, u=B): return svc.accept_quote(u, oid)
 
 @app.post("/api/buyer/orders/{oid}/signoff")
 def b_signoff(oid: int, b: dict, u=B): return svc.signoff(u, oid, b.get("received"), b.get("note", ""), bool(b.get("final")))
+@app.post("/api/buyer/orders/{oid}/rate")
+def b_rate(oid: int, b: dict, u=B): return ops.rate_group(u, oid, b.get("stars"), b.get("comment", ""))
 @app.post("/api/buyer/orders/{oid}/cancel")
 def b_cancel(oid: int, b: dict, u=B): return svc.cancel(u, oid, b.get("reason", ""))
 @app.get("/api/buyer/orders/{oid}/delivery/{i}/photo")
@@ -155,6 +157,87 @@ def l_rc_ok(cid: int, u=L): return svc.approve_ratecard(u, cid)
 @app.post("/api/leader/ratecards/{cid}/reject")
 def l_rc_no(cid: int, u=L): return svc.reject_ratecard(u, cid)
 
+# ---- leader hub: ten tabs, one shared workflow (see workflow.py, hub.py, ops.py) ----
+def _hub(u, fn, *a, **k):
+    with db.S() as s: return fn(hub.Ctx(s, u), *a, **k)
+VIEWS = {"overview": hub.overview, "orders": hub.orders_view, "team": hub.team_view, "quality": hub.quality_view, "delivery": hub.delivery_view, "payouts": hub.payouts_view,
+         "buyers": hub.buyers_view, "pricing": hub.pricing_view, "materials": hub.materials_view, "alerts": hub.alerts_view}
+@app.get("/api/leader/view/{tab}")
+def l_view(tab: str, u=L):
+    if tab not in VIEWS: raise HTTPException(404, "No such tab")
+    return _hub(u, VIEWS[tab])
+@app.get("/api/leader/events")
+def l_events(after: int | None = None, u=L):
+    with db.S() as s: return hub.events_since(s, u, after)
+@app.get("/api/leader/search")
+def l_search(q: str = "", u=L): return _hub(u, hub.search, q)
+@app.get("/api/leader/orders/{oid}/detail")
+def l_detail(oid: int, u=L): return _hub(u, hub.order_detail, oid)
+@app.get("/api/leader/orders/{oid}/timeline")
+def l_timeline(oid: int, u=L): return _hub(u, hub.timeline, oid)
+@app.post("/api/leader/orders")
+def l_create(b: dict, u=L): return ops.create_order(u, b)
+@app.post("/api/leader/orders/{oid}/repeat")
+def l_repeat(oid: int, b: dict, u=L): return ops.repeat_order(u, oid, b.get("qty"), b.get("offered_price"), b.get("deadline_days"), b.get("delivery_date"))
+@app.post("/api/leader/orders/{oid}/accept")
+def l_accept(oid: int, u=L): return svc.accept_quote(u, oid)
+@app.post("/api/leader/orders/{oid}/money")
+def l_money(oid: int, b: dict, u=L): return ops.record_payment(u, oid, b.get("amount"), b.get("kind"), b.get("method", ""), b.get("note", ""))
+@app.put("/api/leader/orders/{oid}/money/due")
+def l_money_due(oid: int, b: dict, u=L): return ops.set_due_date(u, oid, b.get("due_date"))
+@app.post("/api/leader/orders/{oid}/money/remind")
+def l_money_remind(oid: int, u=L): return ops.remind_buyer(u, oid)
+@app.post("/api/leader/orders/{oid}/notes")
+def l_note(oid: int, b: dict, u=L): return ops.add_note(u, oid, b.get("text"))
+@app.post("/api/leader/orders/{oid}/reassign")
+def l_reassign(oid: int, b: dict, u=L): return ops.reassign(u, oid, int(b.get("from", 0)), int(b.get("to", 0)), str(b.get("stage", "")), b.get("pieces"))
+@app.post("/api/leader/orders/{oid}/issues/{i}/resolve")
+def l_issue(oid: int, i: int, b: dict, u=L): return ops.resolve_issue(u, oid, i, b.get("note", ""))
+@app.get("/api/leader/orders/{oid}/evidence/photo")
+def l_evidence(oid: int, u=L):
+    with db.S() as s:
+        ph = ((svc._order(s, oid, u).data.get("evidence") or {}).get("photo"))
+    if not ph: raise HTTPException(404, "No photo")
+    return _img(ph)
+@app.get("/api/leader/members/{mid}")
+def l_member(mid: int, u=L): return _hub(u, hub.member_detail, mid)
+@app.put("/api/leader/members/{mid}")
+def l_member_edit(mid: int, b: dict, u=L): return ops.update_member(u, mid, b.get("name"), b.get("skills"), b.get("capacity"), b.get("lang"), b.get("active"), b.get("phone"))
+@app.post("/api/leader/messages")
+def l_message(b: dict, u=L): return ops.send_message(u, b.get("to", "all"), b.get("text"), b.get("template"))
+@app.post("/api/leader/capacity-check")
+def l_capacity(b: dict, u=L): return _hub(u, hub.can_take, str(b.get("product", "")), b.get("qty"), b.get("days"))
+@app.post("/api/leader/price-calc")
+def l_pricecalc(b: dict, u=L): return _hub(u, hub.price_calc, str(b.get("product", "")), b.get("qty"), b.get("offered"))
+@app.get("/api/leader/buyers/profile")
+def l_buyer(key: str, u=L): return _hub(u, hub.buyer_profile, key)
+@app.put("/api/leader/buyers/profile")
+def l_buyer_edit(b: dict, u=L): return ops.update_buyer(u, str(b.get("key", "")), b.get("notes"), b.get("phone"), b.get("address"))
+@app.get("/api/leader/activity")
+def l_activity(order: int | None = None, member: int | None = None, type: str | None = None, limit: int = 200, u=L): return _hub(u, hub.activity, order, member, type, min(max(limit, 1), 1000))
+@app.get("/api/leader/activity.csv")
+def l_activity_csv(order: int | None = None, member: int | None = None, type: str | None = None, u=L):
+    txt = _hub(u, hub.activity_csv, order=order, member=member, type_=type)
+    return Response(txt, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=sakhi_khata_activity.csv"})
+@app.get("/api/leader/prefs")
+def l_prefs(u=L): return ops.get_prefs(u)
+@app.put("/api/leader/prefs")
+def l_prefs_set(b: dict, u=L): return ops.set_prefs(u, b.get("whatsapp_alerts", True))
+@app.post("/api/leader/materials")
+def l_mat(b: dict, u=L): return ops.save_material(u, b.get("id"), b.get("name"), b.get("unit"), b.get("qty"), b.get("per_piece"), b.get("active"))
+@app.post("/api/leader/suppliers")
+def l_sup(b: dict, u=L): return ops.save_supplier(u, b.get("id"), b.get("name"), b.get("phone"), b.get("note"))
+@app.post("/api/leader/purchases")
+def l_buy(b: dict, u=L): return ops.add_purchase(u, int(b.get("material_id", 0)), b.get("qty"), b.get("cost"), b.get("supplier_id"), b.get("supplier_name"), b.get("note", ""))
+@app.post("/api/leader/orders/{oid}/materials")
+def l_use(oid: int, b: dict, u=L): return ops.use_material(u, oid, int(b.get("material_id", 0)), b.get("qty"))
+PRIVACY = ("Sakhi Khata keeps your group's orders, work reports, quality samples and pay records so the group can price, plan and pay fairly. "
+           "Members see only their own pay. Buyers see their own orders and how far along the work is, never costs or members. Buyers' phone numbers are visible to you only. "
+           "Mission officers see totals only, with small groups hidden. Every change is written to a tamper-evident audit log. Private notes you write stay on the order and are not copied into that log. "
+           "Anyone can ask you to correct or remove their records.")
+@app.get("/api/privacy")
+def privacy(u=Depends(auth.require())): return {"text": PRIVACY}
+
 # ---- seller (SHG member) ----
 M = Depends(auth.require("seller"))
 @app.get("/api/seller/ratecards")
@@ -171,6 +254,8 @@ def s_done(oid: int, b: dict, u=M): return svc.report_done(u, oid, b.get("n"))
 def s_sample(oid: int, b: dict, u=M): return svc.submit_sample(u, oid, str(b.get("note", ""))[:200], b.get("photo"))
 @app.get("/api/seller/orders/{oid}/checklist")
 def s_checklist(oid: int, u=M): return svc.get_checklist(u, oid)
+@app.post("/api/seller/orders/{oid}/issue")
+def s_issue(oid: int, b: dict, u=M): return svc.report_issue(u, oid, b.get("text", ""))
 @app.post("/api/seller/orders/{oid}/accept")
 def s_accept(oid: int, u=M): return svc.accept_task(u, oid)
 @app.post("/api/seller/orders/{oid}/decline")
@@ -205,11 +290,16 @@ def cron_reminders(request: Request):                       # one endpoint for e
 def ledger_verify(u=Depends(auth.require("leader", "officer"))): return svc.LED.verify()
 
 # ---- WhatsApp (Twilio) ----
-def _twilio_ok(request, form):
+def _twilio_ok(request, form, path="/whatsapp"):
     tok = os.getenv("TWILIO_AUTH_TOKEN")
     if not tok: return DEV                                  # production refuses unsigned webhooks
     from twilio.request_validator import RequestValidator
-    return RequestValidator(tok).validate(os.getenv("PUBLIC_URL", "") + "/whatsapp", dict(form), request.headers.get("X-Twilio-Signature", ""))
+    return RequestValidator(tok).validate(os.getenv("PUBLIC_URL", "") + path, dict(form), request.headers.get("X-Twilio-Signature", ""))
+@app.post("/whatsapp/status")
+async def whatsapp_status(request: Request):               # Twilio reports sent / delivered / read / failed for messages the leader sent to members
+    form = await request.form()
+    if not _twilio_ok(request, form, "/whatsapp/status"): return Response("forbidden", status_code=403)
+    ops.message_status(form.get("MessageSid"), str(form.get("MessageStatus", "")).lower()); return Response("", status_code=204)
 @app.post("/whatsapp")
 async def whatsapp(request: Request):
     form = await request.form()

@@ -3,6 +3,12 @@ Only member-facing messages are translated. Money maths and ledger text stay lan
 LANGS = {"1": "en", "2": "hi", "3": "hing", "en": "en", "english": "en", "hi": "hi", "hindi": "hi", "hing": "hing", "hinglish": "hing"}
 STAGE_HI = {"cutting": "कटाई", "stitching": "सिलाई", "finishing": "फिनिशिंग", "packing": "पैकिंग"}
 M = {
+ "task_moved_in": {"en": "Order #{o}: {n} more {stage} pieces were given to you. Your task is now {tot} pieces (Rs {pay}).",
+                   "hi": "ऑर्डर #{o}: आपको {n} और {stage} पीस दिए गए। अब आपका काम {tot} पीस (Rs {pay}) है।",
+                   "hing": "Order #{o}: aapko {n} aur {stage} piece diye gaye. Ab aapka kaam {tot} piece (Rs {pay}) hai."},
+ "task_moved_out": {"en": "Order #{o}: {n} of your {stage} pieces were moved to another member. Your task is now {tot} pieces.",
+                    "hi": "ऑर्डर #{o}: आपके {n} {stage} पीस दूसरी सदस्य को दिए गए। अब आपका काम {tot} पीस है।",
+                    "hing": "Order #{o}: aapke {n} {stage} piece doosri member ko diye gaye. Ab aapka kaam {tot} piece hai."},
  "menu": {"en": "Welcome to Sakhi Khata.\nChoose your language:\n1 English\n2 हिन्दी\n3 Hinglish",
           "hi": "सखी खाता में स्वागत है।\nभाषा चुनें:\n1 English\n2 हिन्दी\n3 Hinglish",
           "hing": "Sakhi Khata mein swagat hai.\nBhasha chunein:\n1 English\n2 हिन्दी\n3 Hinglish"},
