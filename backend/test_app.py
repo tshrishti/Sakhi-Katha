@@ -75,9 +75,9 @@ def chat(who, text, image=None): return bot.handle("whatsapp:" + PH[who], text, 
 def say(who_or_phone, text, image=None):
     p = "whatsapp:" + PH.get(who_or_phone, who_or_phone); return bot.handle(p, text, None, {"kind": "image", "photo": image} if image else None)
 def place(who="buyer", text=ORDER, name="ABC Stores", product="cloth bags"):
-    """Order through the guided conversation. The rule parser never finds the product, so the bot must ask for it."""
-    say(who, "hi"); say(who, "1"); say(who, name); r = say(who, text)
-    if "What product" in r: r = say(who, product)
+    """Place an order as an already-registered buyer; their stored name is used."""
+    text = text.replace(", same as last time", "").replace("same as last time", "")
+    r = say(who, text)
     assert "Please confirm" in r, r
     return say(who, "1")
 def start_order(decline=False):                          # decline=True: Savitha declines and the leader replans (Padma then does stitching and finishing)
@@ -127,7 +127,14 @@ def test_whatsapp_self_registration_in_hindi(world):
     assert "कौन हैं" in bot.handle(me, "Asha")
     assert "कौन हैं" in bot.handle(me, "9")                                                # invalid choice: asked again, nothing registered
     assert "हुनर" in bot.handle(me, "1")
-    out = bot.handle(me, "2"); assert "स्वागत है, Asha" in out and "DONE" in out
+    assert "समूह कोड" in bot.handle(me, "2")
+    out = bot.handle(me, "482913"); assert "लीडर" in out and "अनुरोध" in out
+    assert "approved" in bot.handle("whatsapp:" + LEADER, "1")
+    assert "Asha" in next(m["text"] for m in world.sent if m["phone"] == "+919811122233")
+    from sqlalchemy import select
+    with db.S() as s:
+        member = s.scalars(select(db.User).where(db.User.phone == "+919811122233")).one()
+        assert member.role == "seller" and member.active and member.group_id
     j = "whatsapp:+919822233344"
     for step in ("hi", "1", "Guest"): bot.handle(j, step)
     out = bot.handle(j, "2"); assert "Welcome, Guest" in out and "ACCEPT" in out
@@ -221,40 +228,39 @@ def test_hi_shows_role_menu_and_commands_still_work(world):
 
 def test_new_order_asks_name_then_only_what_is_missing_then_confirms(world, monkeypatch):
     monkeypatch.setattr(llm, "extract_details", smart)
-    say("buyer", "hi"); assert "buyer's name" in say("buyer", "1")
-    r = say("buyer", "ABC Stores"); assert "voice note" in r and "photo of a handwritten order" in r and "PDF" in r
-    r = say("buyer", "I need 200 bags"); assert "What product" in r and "price per piece" in r and "How many pieces" not in r      # asks only for what is missing
-    r = say("buyer", "cloth bags, Rs 60 each, in 20 days"); assert "Please confirm" in r and "Buyer: ABC Stores" in r and "Quantity: 200 pieces" in r and "₹60 per piece" in r
+    say("buyer", "hi"); assert "Tell me what you need" in say("buyer", "1")
+    r = say("buyer", "I need 200 bags"); assert "price per piece" in r and "How many pieces" not in r
+    r = say("buyer", "Rs 60 each, in 20 days"); assert "Please confirm" in r and "Buyer: Test Buyer" in r and "Quantity: 200 pieces" in r and "₹60 per piece" in r
     assert orders(world, "buyer") == []                                                    # nothing is created before the buyer confirms
     assert "1. Confirm order" in r and "2. Edit details" in r and "3. Cancel order" in r
     assert "What would you like to change" in say("buyer", "2")
     r = say("buyer", "quantity 250, price 65"); assert "250 pieces" in r and "₹65 per piece" in r and "Please confirm" in r
     r = say("buyer", "1"); assert "Order #1 is confirmed" in r and "Test SHG" in r
-    o = orders(world, "buyer")[0]; assert o["order"]["qty"] == 250 and o["order"]["buyer_name"] == "ABC Stores" and "price" not in o
-    assert any("New order #1 from ABC Stores" in m for m in to(world, "leader"))
+    o = orders(world, "buyer")[0]; assert o["order"]["qty"] == 250 and o["order"]["buyer_name"] == "Test Buyer" and "price" not in o
+    assert any("New order #1 from Test Buyer" in m for m in to(world, "leader"))
 
 def test_single_missing_detail_accepts_a_bare_number(world):
-    say("buyer", "hi"); say("buyer", "1"); say("buyer", "ABC"); assert "price per piece" in say("buyer", "200 bags, cloth bags, 5 days")
+    say("buyer", "hi"); say("buyer", "1"); assert "price per piece" in say("buyer", "200 bags, cloth bags, 5 days")
     say("buyer", "x")                                                                      # not understood: asked again, nothing breaks
-    r = say("buyer", "60"); assert "What product" in r or "Please confirm" in r
+    r = say("buyer", "60"); assert "Please confirm" in r
 
 def test_cancel_creates_nothing(world):
-    place_steps = lambda: [say("buyer", x) for x in ("hi", "1", "ABC", ORDER, "cloth bags")]
-    place_steps(); assert "cancelled" in say("buyer", "3") and orders(world, "buyer") == []
-    place_steps(); assert "cancelled" in say("buyer", "cancel") and orders(world, "buyer") == []
-    assert "Welcome" in say("buyer", "hi")
+    place_steps = lambda: say("buyer", ORDER.replace(", same as last time", ""))
+    place_steps(); assert "not placed" in say("buyer", "3") and orders(world, "buyer") == []
+    place_steps(); say("buyer", "cancel"); assert "cancelled" in say("buyer", "1") and orders(world, "buyer") == []
+    assert "Namaste" in say("buyer", "hi")
 
 def test_ai_details_voice_photo_and_pdf_are_confirmed_not_assumed(world, monkeypatch):
     monkeypatch.setattr(llm, "extract_details", lambda parts, today=None: RICH)
-    say("buyer", "hi"); say("buyer", "1"); say("buyer", "ABC Stores")
+    say("buyer", "hi"); say("buyer", "1")
     r = bot.handle("whatsapp:" + BUYER, "ek sau bees bag chahiye", None, {"kind": "voice", "url": "https://api.twilio.com/m/1"})
-    assert "What I heard" in r and "Blue cloth bags" in r and "15 Nov 2026" in r and "Pune" in r and "12 x 14 inches" in r
-    say("buyer", "hi"); say("buyer", "1"); say("buyer", "ABC Stores")                       # a photo that cannot be read is reported, never silently accepted
+    assert "What I heard" in r and "Cloth bag" in r and "15 Nov 2026" in r and "Pune" in r and "12 x 14 inches" in r
+    say("buyer", "9"); say("buyer", "1")                                                    # start a separate order; the photo must be read
     monkeypatch.setattr(llm, "read_image", lambda url: None)
     assert "could not read that photo" in bot.handle("whatsapp:" + BUYER, "", None, {"kind": "image", "photo": PIXEL, "photo_hi": PIXEL})
     monkeypatch.setattr(llm, "read_image", lambda url: "200 blue bags Rs 60 by 15 Nov")
     r = bot.handle("whatsapp:" + BUYER, "", None, {"kind": "image", "photo": PIXEL, "photo_hi": PIXEL}); assert "What I read in the photo" in r and "Please confirm" in r
-    say("buyer", "hi"); say("buyer", "1"); say("buyer", "ABC Stores")
+    say("buyer", "9"); say("buyer", "1")
     assert "could not read any text" in bot.handle("whatsapp:" + BUYER, "", None, {"kind": "pdf", "text": None})
     assert "What I read in the PDF" in bot.handle("whatsapp:" + BUYER, "", None, {"kind": "pdf", "text": "Order: 200 blue bags"})
     assert "confirmed" in say("buyer", "1")
@@ -263,10 +269,9 @@ def test_ai_details_voice_photo_and_pdf_are_confirmed_not_assumed(world, monkeyp
 
 def test_first_message_can_be_an_order_and_state_survives_reload(world, monkeypatch):
     monkeypatch.setattr(llm, "extract_details", smart)
-    assert "buyer's name" in say("buyer", ORDER)                                           # an order sent straight away starts the flow
+    assert "Please confirm" in say("buyer", ORDER.replace(", same as last time", ""))      # stored buyer name removes a question
     import importlib; importlib.reload(convo)                                              # state is in the database, not in memory
-    assert "What product" in say("buyer", "Sunrise Traders")
-    assert "Please confirm" in say("buyer", "cloth bags")
+    assert "confirmed and sent" in say("buyer", "1")
 
 def test_leader_places_order_sees_pricing_and_sends_counteroffer(world):
     for x in ("hi", "1", "ABC Stores", ORDER, "cloth bags"): say("leader", x)
@@ -280,7 +285,7 @@ def test_only_the_buyer_can_accept_a_buyers_order(world):
 
 def test_leader_review_walks_an_order_through_without_commands(world):
     place(); say("leader", "menu")
-    r = say("leader", "3"); assert "#1 Cloth bags × 200 - waiting for the leader's quote" in r
+    r = say("leader", "3"); assert "#1 Cloth bag × 200 - waiting for the leader's quote" in r
     r = say("leader", "1"); assert "Shortfall" in r and "Send a quote at ₹85" in r and "Delivery:" in r
     assert "Quote of ₹85" in say("leader", "1") and orders(world)[0]["status"] == "quoted"
     say("buyer", "ACCEPT 1"); say("leader", "menu"); say("leader", "3"); r = say("leader", "1"); assert "Propose a work plan" in r
@@ -506,7 +511,7 @@ def test_reminders_need_secret_and_return_all_types(world, monkeypatch):
     c = TestClient(world.app); assert c.post("/api/cron/reminders").status_code == 404
     monkeypatch.setenv("CRON_SECRET", "s3cret")
     r = c.post("/api/cron/reminders", headers={"X-Cron-Secret": "s3cret"}).json()
-    assert set(r) == {"task_due", "deadline_risk", "sample_review", "payout_approval", "stale", "payment_due", "escalated"}
+    assert set(r) == {"task_due", "deadline_risk", "sample_review", "payout_approval", "escalated"}
 
 def test_task_due_and_deadline_risk_use_the_real_delivery_date(world):
     l, oid = _in_production(world); o = next(x for x in orders(world) if x["id"] == oid)
@@ -548,3 +553,39 @@ def test_bot_accept_command_for_members(world):
     place(); say("leader", "QUOTE 1"); say("buyer", "ACCEPT 1"); say("leader", "PLAN 1")
     say("m1", "hi"); r = say("m1", "ACCEPT 1"); assert "accepted your task in order #1" in r
     assert any("Lakshmi accepted" in m for m in to(world, "leader"))
+
+def test_product_selection_uses_catalogue_and_rejects_arbitrary_product_text(world):
+    r = say("buyer", "I need 200 cups, Rs 60 each, in 5 days")
+    assert "1. Cloth bag" in r and "2. Cotton kurta" in r
+    r = say("buyer", "1")
+    assert "How many pieces" in r and "Product: 1" not in r
+    assert "Please confirm" in say("buyer", "200")
+    assert "confirmed and sent" in say("buyer", "1")
+    assert orders(world, "buyer")[0]["order"]["product"] == "Cloth bag"
+
+def test_buyer_selects_and_remembers_group_and_can_change_it(world):
+    import db
+    from sqlalchemy import select
+    with db.S() as s:
+        s.add(db.Group(name="Second SHG", village="Mysuru", block="B", district="D")); s.commit()
+    r = say("buyer", "I need 100 bags, Rs 60 each, in 5 days")
+    assert "Which group" in r and "Test SHG" in r and "Second SHG" in r
+    assert "Please confirm" in say("buyer", "2")
+    assert "confirmed and sent" in say("buyer", "1")
+    assert orders(world, "buyer")[0]["group"] == "Second SHG"
+    assert "Second SHG" in say("buyer", "change group")
+    say("buyer", "1")
+    with db.S() as s:
+        buyer = s.scalars(select(db.User).where(db.User.phone == BUYER)).one()
+        assert buyer.preferred_group_id == 1
+
+def test_expired_flow_requires_resume_and_navigation_does_not_cancel(world):
+    import time
+    say("buyer", "I need 100 bags")
+    with db.S() as s:
+        state = s.get(db.ChatState, BUYER); state.updated_at = time.time() - convo.TTL - 1; s.commit()
+    assert "draft expired" in say("buyer", "hi")
+    assert "restored" in say("buyer", "1")
+    assert "Please confirm" in say("buyer", "Rs 60 each in 5 days")
+    assert "What would you like to change" in say("buyer", "back")
+    assert "Welcome to Sakhi Khata" in say("buyer", "9")

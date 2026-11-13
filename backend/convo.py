@@ -2,19 +2,18 @@
 leader review -> member tasks -> earnings. It remembers the step per phone number (db.Convo). It only calls the same service layer as the
 dashboards and the typed commands, so permissions and the ledger are unchanged. handle() returns None when the old command handler should answer.
 The AI recommends and explains; the leader and the group decide. Nothing here sets anyone's pay."""
-import datetime, re, time
+import datetime, os, re, time
 from decimal import Decimal as D
 from sqlalchemy import select
-import db, engine as E, i18n, llm, screening, svc
+import db, defaults, engine as E, i18n, llm, screening, svc
 
-TTL = 2 * 3600                                           # a half-finished conversation is forgotten after 2 hours of silence
-GREET = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste", "namaskar", "menu", "start", "नमस्ते", "हेलो", "हाय", "मेनू"}
-STOP = {"cancel", "back", "exit", "stop", "reset"}
-YES, EDIT, NO = {"1", "confirm", "confirm order", "yes", "y", "ok", "okay", "haan", "ha", "हाँ", "हां"}, {"2", "edit", "edit details", "change", "badlo"}, {"3", "cancel", "cancel order", "no", "nahi", "nahin"}
-CMDS = {"buyer": {"status", "accept", "group", "help", "received", "cancel", "rate"},
-        "leader": {"orders", "quote", "plan", "start", "pass", "rework", "risk", "progress", "checklist", "payout", "approve", "resolve", "accept", "help",
-                   "ready", "dispatch", "block", "unblock", "cancel", "today", "alerts", "paid", "remind", "note", "team", "msg", "reassign", "fixed", "stock", "due"},
-        "seller": {"tasks", "earnings", "done", "sample", "checklist", "accept", "decline", "approve", "dispute", "help", "lang", "language", "issue"}}
+TTL = max(1, int(os.getenv("CHAT_TTL_MIN", "30"))) * 60
+GREET = {"hi", "hii", "hiii", "hello", "hey", "hlo", "namaste", "namaskar", "menu", "start", "नमस्ते", "हेलो", "हाय", "मेनू", "ನಮಸ್ಕಾರ", "ನಮಸ್ತೆ"}
+STOP = {"cancel", "exit", "stop", "reset"}
+YES, EDIT, NO = {"1", "confirm", "confirm order", "yes", "y", "ok", "okay", "haan", "ha", "theek hai", "sahi", "हाँ", "हां", "ठीक है", "सही", "ಹೌದು", "ಸರಿ"}, {"2", "edit", "edit details", "change", "badlo", "ಬದಲಿಸಿ"}, {"3", "cancel", "cancel order", "no", "n", "nahi", "nahin", "nako", "नहीं", "नही", "नको", "ಇಲ್ಲ"}
+CMDS = {"buyer": {"status", "accept", "group", "help"},
+        "leader": {"orders", "quote", "plan", "start", "pass", "rework", "risk", "progress", "checklist", "payout", "approve", "resolve", "accept", "join", "help"},
+        "seller": {"tasks", "earnings", "done", "sample", "checklist", "accept", "decline", "approve", "dispute", "help", "lang", "language"}}
 EARN_WORDS = ("kitna", "kamaya", "earnings", "paise", "earned", "कमाई", "कमाया")
 MENUS = {"buyer": [("new", "Place a new order"), ("check", "Check an existing order")],
          "leader": [("new", "Place a new order for a buyer"), ("check", "Check an existing order"), ("review", "Review orders waiting for me")],
@@ -29,16 +28,37 @@ REQUIRED = [("product", "What product is it? (for example, cloth bags)", None), 
 # ---------- state ----------
 def _load(phone):
     with db.S() as s:
-        c = s.get(db.Convo, phone)
-        if not c or not c.step or time.time() - (c.ts or 0) > TTL: return None
-        return {"step": c.step, "data": dict(c.data or {})}
+        c = s.get(db.ChatState, phone)
+        if c:
+            data, step, updated = dict(c.data or {}), c.step, c.updated_at or 0
+            if step and time.time() - updated > TTL:
+                if data.get("parts") and step not in ("expired", "menu"):
+                    c.step, c.data, c.updated_at = "expired", {"previous_step": step, "flow": data}, time.time()
+                    step, data = "expired", dict(c.data)
+                else:
+                    c.step, c.data, c.updated_at = None, {}, time.time()
+                    step, data = None, {}
+                s.commit()
+            return {"step": step, "data": data, "updated_at": updated, "pending_action": c.pending_action}
+        legacy = s.get(db.Convo, phone)
+        if not legacy: return None
+        if not legacy.step or time.time() - (legacy.ts or 0) > TTL: return None
+        return {"step": legacy.step, "data": dict(legacy.data or {}), "updated_at": legacy.ts or 0, "pending_action": None}
 def _save(phone, step, data):
     with db.S() as s:
-        c = s.get(db.Convo, phone) or db.Convo(phone=phone); c.step, c.data, c.ts = step, data, time.time(); s.merge(c); s.commit()
+        c = s.get(db.ChatState, phone) or db.ChatState(phone=phone, history=[], lang="en")
+        c.step, c.data, c.updated_at = step, data, time.time()
+        s.merge(c); s.commit()
 def _clear(phone):
     with db.S() as s:
-        c = s.get(db.Convo, phone)
-        if c: c.step, c.data = None, {}; s.commit()
+        c = s.get(db.ChatState, phone)
+        if c:
+            c.step, c.data, c.updated_at = None, {}, time.time()
+            s.commit()
+        legacy = s.get(db.Convo, phone)
+        if legacy:
+            legacy.step, legacy.data = None, {}
+            s.commit()
 def _go(phone, step, data, text): _save(phone, step, data); return text
 
 # ---------- small helpers ----------
@@ -51,8 +71,27 @@ def _name(v):
     o = v["order"]; return (o.get("product") or "Order").strip().capitalize()
 def _line(v): return f"#{v['id']} {_name(v)} × {v['order']['qty']} - {STATUS.get(v['status'], v['status'])}"
 def _menu_text(role): return "\n".join(f"{i}. {lab}" for i, (_, lab) in enumerate(MENUS[role], 1))
-def _welcome(role): return ("Namaste! 🙏 Welcome to Sakhi Khata.\n\nI help you manage orders, coordinate work among SHG members, check product quality, and track everyone's earnings.\n\n"
-                            f"What would you like to do today?\n\n{_menu_text(role)}\n\nYou can reply by typing or sending a voice note. Send MENU any time to come back here.")
+def _welcome(u, returning=False):
+    role, name = u["role"], (u.get("name") or "").split()[0]
+    hello = f"Namaste {name}." if name else "Namaste."
+    if role == "buyer":
+        rows = svc.my_orders(u)
+        active = next((o for o in rows if o["status"] not in ("closed", "cancelled")), None)
+        status = f" Order #{active['id']} is {active['progress_pct']}% done." if active and active.get("progress_pct") else ""
+        count = status or (f" You have {len(rows)} order{'s' if len(rows) != 1 else ''}." if rows else "")
+    elif role == "leader":
+        orders = svc.my_orders(u)
+        needs = sum(o["status"] in ("submitted", "planned", "payout_pending") for o in orders)
+        count = f" {needs} order{'s' if needs != 1 else ''} need you."
+    elif role == "seller":
+        tasks = svc.tasks(u)
+        task_count = sum(t["status"] in ("planned", "in_production") for t in tasks)
+        count = f" You have {task_count} task{'s' if task_count != 1 else ''}."
+    else:
+        count = " Use the programme dashboard for aggregate reports."
+    intro = f"{hello}{count}" if returning else f"{hello} Welcome to Sakhi Khata.{count}"
+    menu = _menu_text(role) if role in MENUS else ""
+    return (intro + (f"\n{menu}" if menu else ""))[:160]
 def _choose(options, t):
     t = (t or "").strip().lower()
     if t.isdigit(): i = int(t) - 1; return options[i] if 0 <= i < len(options) else None
@@ -83,10 +122,16 @@ def _ingest(t, media):
     return t, {"source": "text", "text": t}, None
 
 # ---------- new order ----------
+def _product_prompt():
+    return "Which product do you need?\n" + "\n".join(
+        f"{i}. {tpl['label']}" for i, tpl in enumerate(defaults.TEMPLATES.values(), 1)
+    ) + "\nReply 0 to go back or 9 for the menu."
+
 def _ask_missing(phone, d, missing):
-    d["missing"] = [k for k, _, _ in missing]; qs = [q for _, q, _ in missing]
-    body = qs[0] if len(qs) == 1 else "\n".join(f"{i}. {q}" for i, q in enumerate(qs, 1)) + "\n\nYou can answer everything in one message."
-    return _go(phone, "missing", d, ("I still need one detail:\n" if len(qs) == 1 else "Thank you! I still need a few details:\n") + body)
+    key, question, _ = missing[0]
+    d["missing"], d["awaiting"] = [key], key
+    body = _product_prompt() if key == "product" else question + "\nReply 0 to go back or 9 for the menu."
+    return _go(phone, "missing", d, "I still need one detail:\n" + body)
 
 def _summary(d):
     o = d["order"]; rows = [("Buyer", d.get("buyer_name")), ("Product", o.get("product")), ("Quantity", f"{o['qty']} pieces" if o.get("qty") else None), ("Size", o.get("size")),
@@ -101,58 +146,158 @@ def _summary(d):
     if d.get("unclear"): txt += "\n\nNot clear, please check: " + "; ".join(d["unclear"][:4])
     return txt + "\n\nPlease confirm these details.\n\nReply with:\n1. Confirm order\n2. Edit details\n3. Cancel order"
 
-def _process(phone, d):
+def _process(u, phone, d, attempted=None):
     """Understand everything said so far; ask only for what is still missing; otherwise show the summary for confirmation."""
     ex = llm.extract_details(d["parts"]); d["order"], d["unclear"] = ex["order"], ex["unclear"]
+    product_key = defaults.detect(d["order"].get("product") or "")
+    d["order"]["product"] = defaults.TEMPLATES[product_key]["label"] if product_key else None
     missing = [r for r in REQUIRED if not d["order"].get(r[0])]
-    d["tries"] = d.get("tries", 0) + (1 if missing else 0)
-    if missing and d["tries"] > 4: _clear(phone); return "I am still missing some details, so I have stopped this order. Send MENU to start again, or ask your group leader for help."
+    if attempted and missing and missing[0][0] == attempted:
+        failures = dict(d.get("failures", {})); failures[attempted] = failures.get(attempted, 0) + 1; d["failures"] = failures
+        if failures[attempted] >= 2:
+            group_id = d.get("group_id") or u.get("preferred_group_id") or u.get("group_id")
+            delivered = svc.handoff(u, group_id, "A buyer needs help completing an order but the bot could not read one of the details. Please contact them.")
+            _clear(phone)
+            if delivered:
+                return "I could not read this after two tries. I have asked your group leader to call you. Reply 1 to start again or 9 for the menu."
+            return "I could not read this after two tries. Please ask your group leader to call you. Reply 1 to start again or 9 for the menu."
+    elif attempted:
+        failures = dict(d.get("failures", {})); failures.pop(attempted, None); d["failures"] = failures
     if missing: return _ask_missing(phone, d, missing)
     return _go(phone, "confirm", d, _summary(d))
 
+def _group_prompt(phone, d, groups, mode="order"):
+    d["group_options"] = [g["id"] for g in groups]
+    d["group_mode"] = mode
+    lines = [f"{i}. {g['name']}" + (f", {g['village']}" if g.get("village") else "") +
+             f" ({g['orders_delivered']} delivered)" for i, g in enumerate(groups, 1)]
+    return _go(phone, "group_pick", d, "Which group should receive the order?\n" + "\n".join(lines) + "\nReply 0 to go back or 9 for the menu.")
+
+def change_group(u, phone):
+    groups = svc.groups()
+    if len(groups) < 2: return "There is only one group available, so no change is needed."
+    return _group_prompt(phone, {}, groups, mode="change")
+
+def _start_for_group(u, phone, d):
+    groups = svc.groups()
+    if not groups: return "No SHG group is set up yet. Please ask the programme team."
+    if u["role"] == "buyer":
+        chosen = d.get("group_id") or u.get("preferred_group_id") or svc.preferred_group(u)
+        if len(groups) == 1:
+            chosen = groups[0]["id"]
+            svc.set_preferred_group(u, chosen)
+        if chosen not in {g["id"] for g in groups}:
+            return _group_prompt(phone, d, groups)
+        d["group_id"] = chosen
+    if d.get("ingest_error"):
+        return _go(phone, "details", d, d["ingest_error"] + "\n\nPlease type the order details instead. Reply 0 to go back or 9 for the menu.")
+    if d["parts"]: return _process(u, phone, d)
+    if u["role"] == "leader":
+        return _go(phone, "buyer_name", d, "First, what is the buyer's or business's name?")
+    return _go(phone, "details", d, "Tell me what you need. Include the product, quantity, price per piece and delivery date or days. You can send text, a voice note, photo or PDF. Reply 0 to go back or 9 for the menu.")
+
 def _start_order(u, phone, t, media):
-    d = {"parts": [], "evidence": None, "buyer_name": None}
+    if u["role"] == "buyer" and re.search(r"\b(same as last time|same order|wahi order phir se|pichli baar jaisa)\b", t or "", re.I):
+        previous = svc.last_order(u)
+        if previous:
+            d = {"parts": ["Repeat the last order"], "evidence": None, "buyer_name": u.get("name"),
+                 "order": previous["order"], "group_id": previous["group_id"]}
+            o = d["order"]
+            return _go(phone, "repeat_confirm", d,
+                       f"Repeat your last order: {o.get('qty')} {o.get('product')}, {o.get('colour') or 'no colour specified'}, Rs {o.get('offered_price')} each. 1 Yes  2 Change")
+    d = {"parts": [], "evidence": None, "buyer_name": u.get("name") if u["role"] == "buyer" else None}
     if t or media:
         txt, ev, err = _ingest(t, media)
-        if err: _go(phone, "buyer_name", d, ""); return err + "\n\nFirst, please tell me the buyer's name or business name."
+        if err:
+            if u["role"] == "buyer":
+                d["ingest_error"] = err
+                groups = svc.groups()
+                chosen = u.get("preferred_group_id") or svc.preferred_group(u)
+                if len(groups) > 1 and chosen not in {g["id"] for g in groups}:
+                    return _group_prompt(phone, d, groups)
+                return _go(phone, "details", d, err + "\n\nPlease type the order details instead. Reply 0 to go back or 9 for the menu.")
+            _go(phone, "buyer_name", d, ""); return err + "\n\nFirst, please tell me the buyer's name or business name."
         d["parts"], d["evidence"] = [txt], ev
+    if u["role"] == "buyer": return _start_for_group(u, phone, d)
     return _go(phone, "buyer_name", d, "Sure! Let's create a new order.\n\nFirst, please tell me the buyer's name or business name.")
 
 def _step_buyer_name(u, phone, st, t, w, media):
     d = st["data"]; name = (t or "").strip()[:60]
     if not name: return "Please tell me the buyer's name or business name."
     d["buyer_name"] = name
-    if d["parts"]: return _process(phone, d)
-    return _go(phone, "details", d, f"Thank you! Now please share the order details. You can:\n\n- Send a voice note explaining the order.\n- Send a photo of a handwritten order.\n- Upload a PDF or order document.\n- Type the order details directly.")
+    if d["parts"]: return _process(u, phone, d)
+    return _go(phone, "details", d, "Now share the order details. You can send text, a voice note, a photo or PDF. Reply 0 to go back or 9 for the menu.")
 
 def _step_details(u, phone, st, t, w, media):
     d = st["data"]; txt, ev, err = _ingest(t, media)
     if err: return err
     if not (txt or "").strip(): return "Please send the order details as a voice note, photo, PDF or text."
     d["parts"], d["evidence"] = [txt], ev
-    return _process(phone, d)
+    return _process(u, phone, d)
 
 def _step_missing(u, phone, st, t, w, media):
     d = st["data"]; txt, ev, err = _ingest(t, media)
     if err: return err
-    miss = d.get("missing", []); n = _num(txt)
-    if miss == ["product"] and txt: d["parts"] = d["parts"] + [f"Product: {txt.strip()[:60]}"]; return _process(phone, d)
-    lab = next((x for x in REQUIRED if x[0] == miss[0]), None) if len(miss) == 1 else None
-    d["parts"] = d["parts"] + [lab[2].format(n=n) if (lab and lab[2] and n) else f"(Answering: {'; '.join(x[1] for x in REQUIRED if x[0] in miss)}) {txt}"]
-    return _process(phone, d)
+    miss = d.get("missing", [])
+    if not miss: return _start_for_group(u, phone, d)
+    key = miss[0]
+    if key == "product":
+        options = list(defaults.TEMPLATES)
+        if (txt or "").strip().isdigit():
+            idx = int(txt.strip()) - 1
+            product_key = options[idx] if 0 <= idx < len(options) else None
+        else:
+            product_key = defaults.detect(txt or "")
+        if product_key:
+            d["parts"] = d["parts"] + [f"Product: {defaults.TEMPLATES[product_key]['label']}"]
+        return _process(u, phone, d, attempted=key)
+    n = _num(txt)
+    lab = next(x for x in REQUIRED if x[0] == key)
+    d["parts"] = d["parts"] + [lab[2].format(n=n) if lab[2] and n else str(txt)]
+    return _process(u, phone, d, attempted=key)
 
 def _step_edit(u, phone, st, t, w, media):
     d = st["data"]; txt, ev, err = _ingest(t, media)
     if err: return err
-    d["parts"] = d["parts"] + [f"Correction from the buyer: {txt}"]; d["tries"] = 0
-    return _process(phone, d)
+    d["parts"] = d["parts"] + [f"Correction from the buyer: {txt}"]; d["failures"] = {}
+    return _process(u, phone, d)
 
 def _step_confirm(u, phone, st, t, w, media):
-    d, a = st["data"], (t or "").strip().lower()
+    d, a = st["data"], " ".join((t or "").strip().lower().split())
     if a in YES: return _place(u, phone, d)
     if a in EDIT: return _go(phone, "edit", d, "No problem. What would you like to change? For example: quantity 250, or price 65, or delivery 20 November.")
-    if a in NO or a in STOP: _clear(phone); return "Okay, the order is cancelled. Send MENU whenever you want to start again."
+    if a in NO or a in STOP:
+        _clear(phone); _save(phone, "menu", {})
+        return "Okay, the order was not placed. Reply 1 to start another order or 9 for the menu."
     return "Please reply with:\n1. Confirm order\n2. Edit details\n3. Cancel order"
+
+def _step_group_pick(u, phone, st, t, w, media):
+    d = st["data"]
+    if not (t or "").strip().isdigit(): return _group_prompt(phone, d, svc.groups(), d.get("group_mode", "order"))
+    idx = int(t.strip()) - 1
+    ids = d.get("group_options", [])
+    if not 0 <= idx < len(ids): return _group_prompt(phone, d, svc.groups(), d.get("group_mode", "order"))
+    group_id = ids[idx]
+    svc.set_preferred_group(u, group_id)
+    if d.get("group_mode") == "change":
+        _clear(phone); _save(phone, "menu", {})
+        group = next(g for g in svc.groups() if g["id"] == group_id)
+        return f"Your selected group is {group['name']}. Reply 1 to place an order or 9 for the menu."
+    d["group_id"] = group_id
+    if d.get("group_mode") == "submit": return _place(u, phone, d, group_id)
+    u["preferred_group_id"] = group_id
+    return _start_for_group(u, phone, d)
+
+def _step_repeat_confirm(u, phone, st, t, w, media):
+    d, answer = st["data"], " ".join((t or "").strip().lower().split())
+    if answer in YES: return _place(u, phone, d, d.get("group_id"))
+    if answer in EDIT:
+        _clear(phone)
+        return _start_order(u, phone, "", None)
+    if answer in NO or answer in STOP:
+        _clear(phone); _save(phone, "menu", {})
+        return "Okay, no repeat order was placed. Reply 1 to start a new order or 9 for the menu."
+    return "Reply 1 to repeat the order, 2 to change the details, or 9 for the menu."
 
 def _money(x): return f"{D(str(x)):.2f}".rstrip("0").rstrip(".")
 def _pricing_block(r, offered):
@@ -165,14 +310,21 @@ def _pricing_block(r, offered):
         lines.append("Ways to make it work:"); lines += [f"{i}. {x['label']}" for i, x in enumerate(r["options"], 1)]
     return "\n".join(lines), off < floor, p["suggested_counter"]
 
-def _place(u, phone, d):
+def _place(u, phone, d, group_id=None):
     o = dict(d["order"]); o["buyer_name"] = d["buyer_name"]
     g = svc.groups()
     if not g: return "No SHG group is set up yet. Please ask the programme team."
-    v = svc.submit_order(u, g[0]["id"], "\n".join(d["parts"]), pre={"order": o, "unclear": d.get("unclear", []), "evidence": d.get("evidence")})
+    if u["role"] == "buyer":
+        group_id = group_id or d.get("group_id") or u.get("preferred_group_id") or svc.preferred_group(u)
+        if not group_id and len(g) == 1: group_id = g[0]["id"]
+        if not group_id or group_id not in {group["id"] for group in g}:
+            return _group_prompt(phone, d, g, mode="submit")
+    else:
+        group_id = u["group_id"]
+    v = svc.submit_order(u, group_id, "\n".join(d.get("parts", [])), pre={"order": o, "unclear": d.get("unclear", []), "evidence": d.get("evidence")})
     if u["role"] != "leader":
         _clear(phone)
-        return f"✅ Order #{v['id']} is confirmed and sent to {v['group']}.\n\nThe SHG leader will check the price and the work plan, and you will get a quote here. Send STATUS or MENU any time.\n\nPrivacy: only the group leader can see your phone number."
+        return f"✅ Order #{v['id']} is confirmed and sent to {v['group']}.\n\nThe SHG leader will check the price and the work plan, and you will get a quote here. Send STATUS or MENU any time."
     r = svc.review(u, v["id"]); block, under, counter = _pricing_block(r, o["offered_price"])
     opts = ([("quote_auto", f"Send a counteroffer of ₹{counter} per piece")] if under else [("quote_auto", f"Accept the offered price (send quote ₹{o['offered_price']})")]) + [("quote_own", "Send a quote at my own price"), ("later", "Review it later")]
     return _go(phone, "after_submit", {"oid": v["id"], "opts": [k for k, _ in opts], "auto": str(counter if under else o["offered_price"])},
@@ -221,7 +373,8 @@ def _card(u, v):
 
 def _check(u, phone):
     rows = svc.my_orders(u)
-    if not rows: _clear(phone); return "You have no orders yet. Send MENU to place one."
+    if not rows:
+        return _go(phone, "menu", {}, "You have no orders yet.\n1. Place a new order\n2. Check an existing order\nReply 9 for the menu.")
     if len(rows) == 1: _clear(phone); return _card(u, rows[0]) + "\n\nSend MENU for more options."
     return _go(phone, "check_pick", {}, "Which order would you like to check? Reply with the order number:\n\n" + "\n".join(_line(v) for v in rows[:10]))
 
@@ -233,7 +386,8 @@ def _step_check_pick(u, phone, st, t, w, media):
 # ---------- leader: review and manage ----------
 def _review(u, phone):
     rows = svc.my_orders(u)
-    if not rows: _clear(phone); return "There are no orders in your group yet. Send MENU to place one."
+    if not rows:
+        return _go(phone, "menu", {}, "There are no orders in your group yet.\n1. Place a new order\n2. Check an existing order\nReply 9 for the menu.")
     return _go(phone, "review_pick", {}, "Orders in your group:\n\n" + "\n".join(_line(v) for v in rows[:10]) + "\n\nReply with an order number to open it, or send MENU.")
 
 def _actions(v):
@@ -296,7 +450,8 @@ def _step_resolve_note(u, phone, st, t, w, media):
 WORK = [("accept", "Accept a task"), ("done", "Report work done"), ("sample", "Send a sample photo"), ("decline", "Decline a task"), ("issue", "Report a problem or delay"), ("back", "Back to the menu")]
 def _work(u, phone):
     ts = svc.tasks(u)
-    if not ts: _clear(phone); return "You have no assigned work right now. When the leader plans an order, I will message you here. Send MENU for other options."
+    if not ts:
+        return _go(phone, "menu", {}, "You have no assigned work right now. Reply 2 to check earnings or 9 for the menu.")
     lines = "\n".join(i18n.t("task_line", u["lang"], o=x["order_id"], stage=i18n.stage(x["stage"], u["lang"]), n=x["units"], pay=x["expected_pay"], done=x["done"], st=x["status"].replace("_", " ")) for x in ts)
     return _go(phone, "work_menu", {}, f"Your assigned work:\n\n{lines}\n\nWhat would you like to do?\n{_opts(WORK)}")
 
@@ -311,9 +466,11 @@ def _after_order(u, phone, act, oid):
 def _step_work_menu(u, phone, st, t, w, media):
     act = _choose([k for k, _ in WORK], t) if (t or "").strip().isdigit() else None
     if not act: return "Please reply with a number from the list, or send MENU."
-    if act == "back": _clear(phone); return _welcome(u["role"])
+    if act == "back": _clear(phone); _save(phone, "menu", {}); return _welcome(u)
     rows = [x for x in svc.tasks(u) if x["status"] in ACT_STATUS[act]]
-    if not rows: _clear(phone); return {"accept": "There is no task waiting for you to accept.", "done": "None of your orders is in production yet.", "sample": "None of your orders is in production yet.", "decline": "You can only decline a task before production starts, and there is none like that now.", "issue": "You have no active task to report on."}[act] + " Send MENU for other options."
+    if not rows:
+        _save(phone, "menu", {})
+        return {"accept": "There is no task waiting for you to accept.", "done": "None of your orders is in production yet.", "sample": "None of your orders is in production yet.", "decline": "You can only decline a task before production starts, and there is none like that now.", "issue": "You have no active task to report on."}[act] + " Reply 2 to check earnings or 9 for the menu."
     ids = list(dict.fromkeys(x["order_id"] for x in rows))
     if len(ids) == 1: return _after_order(u, phone, act, ids[0])
     return _go(phone, "work_order", {"act": act, "ids": ids}, "Which order? Reply with the number: " + ", ".join(f"#{i}" for i in ids))
@@ -341,7 +498,8 @@ def _step_work_issue(u, phone, st, t, w, media):
 # ---------- member: earnings ----------
 def _earn(u, phone):
     es = svc.earnings(u)
-    if not es: _clear(phone); return i18n.t("no_earn", u["lang"]) + " Send MENU for other options."
+    if not es:
+        return _go(phone, "menu", {}, i18n.t("no_earn", u["lang"]) + " Reply 1 to check work or 9 for the menu.")
     txt = "Your earnings:\n\n" + "\n\n".join(f"Order #{e['order_id']}: {e['explain']}" for e in es) + "\n\n(These figures come from the recorded work and the approved rate card. A machine does not decide your pay.)"
     pend = next((e for e in es if e["status"] == "payout_pending" and not e["approved_by_me"]), None)
     if not pend: _clear(phone); return txt + "\n\nSend MENU for other options."
@@ -351,7 +509,7 @@ def _step_earn_act(u, phone, st, t, w, media):
     a, oid = (t or "").strip(), st["data"]["oid"]
     if a == "1": v = svc.approve_payout(u, oid); _clear(phone); return i18n.t("thanks", u["lang"], st=v["status"].replace("_", " "))
     if a == "2": return _go(phone, "earn_reason", st["data"], "I am sorry about that. Please tell me what looks wrong (for example, the count of pieces). The payment waits until your leader looks at it.")
-    if a == "3": _clear(phone); return _welcome(u["role"])
+    if a == "3": _clear(phone); _save(phone, "menu", {}); return _welcome(u)
     return "Please reply 1, 2 or 3."
 def _step_earn_reason(u, phone, st, t, w, media):
     if not (t or "").strip(): return "Please tell me what looks wrong, in words or a voice note."
@@ -366,7 +524,63 @@ def _run(u, phone, k):
     if k == "new": return _start_order(u, phone, "", None)
     return {"check": _check, "review": _review, "work": _work, "earn": _earn}[k](u, phone)
 
+def _step_expired(u, phone, st, t, w, media):
+    a = " ".join((t or "").strip().lower().split())
+    d = st["data"]
+    if a in YES:
+        _save(phone, d["previous_step"], d["flow"])
+        return "Your earlier draft is restored. Please continue with the current question, or reply 0 to go back / 9 for the menu."
+    if a == "2" or a in NO:
+        _clear(phone); _save(phone, "menu", {})
+        return _welcome(u)
+    return "Welcome back. Your previous order draft expired. Reply 1 to continue it or 2 to start fresh."
+
+def _step_cancel_confirm(u, phone, st, t, w, media):
+    a = " ".join((t or "").strip().lower().split())
+    d = st["data"]
+    if a in YES:
+        _clear(phone); _save(phone, "menu", {})
+        return "Okay, the current step was cancelled. Reply 1 to start again or 9 for the menu."
+    if a == "2" or a in NO:
+        _save(phone, d["previous_step"], d["flow"])
+        return "Kept your current work. Continue with the question, or reply 0 to go back / 9 for the menu."
+    return "Cancel this step? Reply 1 to cancel or 2 to continue."
+
+def _step_cancel_from_menu(u, phone, st, t, w, media):
+    return _step_cancel_confirm(u, phone, st, t, w, media)
+
+def _back(u, phone, st):
+    step, data = st["step"], st["data"]
+    if step in ("missing", "details"):
+        return _go(phone, "details", data, "Please share the order details again. Reply 0 to go back or 9 for the menu.")
+    if step == "confirm":
+        return _go(phone, "edit", data, "What would you like to change? Reply 0 to return to the summary or 9 for the menu.")
+    if step == "edit":
+        return _go(phone, "confirm", data, _summary(data))
+    if step == "group_pick":
+        if data.get("group_mode") == "change":
+            _clear(phone); _save(phone, "menu", {}); return _welcome(u)
+        return _go(phone, "details", data, "Tell me the order details. Reply 0 to go back or 9 for the menu.")
+    if step == "repeat_confirm":
+        _clear(phone); _save(phone, "menu", {}); return _welcome(u)
+    if step == "work_order": return _work(u, phone)
+    if step in ("work_pieces", "work_sample", "work_issue"): return _work(u, phone)
+    if step == "earn_reason": return _earn(u, phone)
+    if step in ("quote_price", "review_act"): return _open(u, phone, data.get("oid", 0))
+    if step == "resolve_note": return _open(u, phone, data.get("oid", 0))
+    if step == "review_pick": return _welcome(u)
+    if step == "check_pick": return _welcome(u)
+    if step == "after_submit": return _review(u, phone)
+    if step == "earn_act": return _earn(u, phone)
+    _clear(phone); _save(phone, "menu", {})
+    return _welcome(u)
+
+def _menu(u, phone):
+    _clear(phone); _save(phone, "menu", {})
+    return _welcome(u)
+
 STEPS = {"menu": _step_menu, "buyer_name": _step_buyer_name, "details": _step_details, "missing": _step_missing, "confirm": _step_confirm, "edit": _step_edit,
+         "group_pick": _step_group_pick, "repeat_confirm": _step_repeat_confirm, "expired": _step_expired, "cancel_confirm": _step_cancel_confirm,
          "after_submit": _step_after_submit, "quote_price": _step_quote_price, "check_pick": _step_check_pick, "review_pick": _step_review_pick,
          "review_act": _step_review_act, "resolve_note": _step_resolve_note, "work_menu": _step_work_menu, "work_order": _step_work_order, "work_pieces": _step_work_pieces,
          "work_sample": _step_work_sample, "work_issue": _step_work_issue, "earn_act": _step_earn_act, "earn_reason": _step_earn_reason}
@@ -379,14 +593,34 @@ def handle(u, phone, t, w, media):
     role, st, word = u["role"], _load(phone), (w[0] if w else "")
     if role not in MENUS: return None
     kind = (media or {}).get("kind")
-    if len(w) <= 2 and word in GREET and not any(x.isdigit() for x in w): _save(phone, "menu", {}); return _welcome(role)
-    if len(w) == 1 and word in STOP: _clear(phone); return "Okay, cancelled. Send MENU whenever you want to start again."
-    if not st or st["step"] == "menu":
+    active = st and st.get("step")
+    if active == "expired": return _step_expired(u, phone, st, t, w, media)
+    if word in ("menu", "9"): return _menu(u, phone)
+    if word in ("0", "back"): return _back(u, phone, st) if active else _menu(u, phone)
+    if u["role"] == "buyer" and " ".join((t or "").lower().split()) in ("change group", "group change"):
+        if active and active != "menu": return "Please finish this step or reply 9 for the menu before changing groups."
+        return change_group(u, phone)
+    if word in STOP:
+        if word == "cancel" and len(w) > 1: return None
+        if active and active not in ("menu", "cancel_confirm"):
+            return _go(phone, "cancel_confirm", {"previous_step": active, "flow": st["data"]},
+                       "Cancel this step? Reply 1 to cancel or 2 to continue.")
+        return _menu(u, phone)
+    if len(w) <= 2 and word in GREET and not any(x.isdigit() for x in w):
+        if active and active != "menu":
+            return "Please answer the current question, or reply 0 to go back / 9 for the menu."
+        recent = bool(st and st.get("updated_at") and time.time() - st["updated_at"] < 86400)
+        _save(phone, "menu", {})
+        return _welcome(u, returning=recent)
+    if active is None or active == "menu":
         if _is_command(role, w): return None
         if role == "seller" and kind == "image": return None                                  # a photo from a member is a work sample, as before
         if role in ("buyer", "leader") and (kind in ("image", "pdf", "voice") or _looks_like_order(t)): return _start_order(u, phone, t, media)
-        if not st: _save(phone, "menu", {}); return _welcome(role)
-    elif st["step"] in ESCAPE and _is_command(role, w) and not word.isdigit(): _clear(phone); return None
-    fn = STEPS.get(st["step"]) if st else None
-    if not fn: _save(phone, "menu", {}); return _welcome(role)
+        if _is_command(role, w): return None
+        if not active:
+            _save(phone, "menu", {})
+            return _welcome(u, returning=bool(st and st.get("updated_at") and time.time() - st["updated_at"] < 86400))
+    if _is_command(role, w): return None
+    fn = STEPS.get(active) if active else None
+    if not fn: _save(phone, "menu", {}); return _welcome(u)
     return fn(u, phone, st, t, w, media)

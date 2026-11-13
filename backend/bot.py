@@ -2,12 +2,12 @@
 Like MaaSakhi: short messages, the number identifies the user, language is chosen on first contact, photos and voice notes work.
 Unknown numbers get nothing unless OPEN_REGISTRATION=1 (then they register themselves like in MaaSakhi); otherwise the leader adds members."""
 from sqlalchemy import select
-import auth, bootstrap, convo, db, hub, i18n, ops, svc
+import auth, bootstrap, convo, db, i18n, svc
 
 SEEN, PREF, ONB = set(), {}, {}
 SKILLS = {"1": "cutting", "2": "stitching", "3": "finishing", "4": "packing"}
-HELP = {"buyer": "Send your order as text or voice (quantity, price per piece, days). STATUS lists orders. ACCEPT <id> accepts a quote. RECEIVED <id> <pieces> confirms delivery (add FINAL to accept a shortfall). RATE <id> <1-5> rates the group after delivery. CANCEL <id> before work starts. LANG 1/2/3 changes language.",
-        "leader": "TODAY (what needs you), ORDERS, QUOTE <id> [price], PLAN <id>, START <id>, PASS <id> <name>, REWORK <id> <name> <pieces> <reason>, RISK <id> [days left], PROGRESS <id>, CHECKLIST <id>, PAYOUT <id> [name rework-count], APPROVE <id>, RESOLVE <id> <note>, READY <id> <packed pieces>, DISPATCH <id> <courier> [tracking], BLOCK <id> <reason>, UNBLOCK <id>, CANCEL <id> <reason>, PAID <id> <rupees>, REMIND <id>, DUE, NOTE <id> <text>, TEAM, MSG <name or all> <text>, REASSIGN <id> <from> <to> <pieces> [stage], FIXED <id> [note], STOCK."}
+HELP = {"buyer": "Send your order as text or voice (quantity, price per piece, days). STATUS lists orders. ACCEPT <id> accepts a quote. RECEIVED <id> <pieces> confirms delivery (add FINAL to accept a shortfall). CANCEL <id> before work starts. LANG 1/2/3 changes language.",
+        "leader": "ORDERS, QUOTE <id> [price], PLAN <id>, START <id>, PASS <id> <name>, REWORK <id> <name> <pieces> <reason>, RISK <id> [days left], PROGRESS <id>, CHECKLIST <id>, PAYOUT <id> [name rework-count], APPROVE <id>, RESOLVE <id> <note>, READY <id> <packed pieces>, DISPATCH <id> <courier> [tracking], BLOCK <id> <reason>, UNBLOCK <id>, CANCEL <id> <reason>."}
 
 def _id(w):
     try: return int(w[1])
@@ -18,18 +18,6 @@ def _fmt(v):
     return f"#{v['id']} {v['order']['qty']} pcs Rs {v['order']['offered_price']} [{_st(v)}]" + (f" quote Rs {v['quote']}" if v.get("quote") else "") + extra
 def _mine(u, oid): return next((x for x in svc.my_orders(u) if x["id"] == oid), None)
 
-def _member_id(u, word):
-    word = word.lower()
-    for m in svc.members(u):
-        if m["name"].lower() == word or m["name"].lower().split()[0] == word: return m["id"]
-    raise svc.Err(404, f"No member called {word}")
-def _today(u):
-    """The same list the dashboard shows under 'Needs your decision': one workflow, two surfaces."""
-    with db.S() as s: needs = hub.Ctx(s, u).needs
-    if not needs: return "Nothing needs you right now. Everything is on track."
-    lines = [f"{i}. {a['title']}" + (f"\n   Send: {a['cmd']}" if a["cmd"] else "") for i, a in enumerate(needs[:6], 1)]
-    return f"{len(needs)} item(s) need you:\n" + "\n".join(lines) + (f"\n...and {len(needs) - 6} more on the dashboard." if len(needs) > 6 else "")
-
 def _buyer(u, t, w, media):
     c = w[0] if w else ""
     if c == "status": return "\n".join(_fmt(v) for v in svc.my_orders(u)) or "No orders yet."
@@ -37,14 +25,18 @@ def _buyer(u, t, w, media):
     if c == "received":
         if len(w) < 3 or not w[2].isdigit(): raise svc.Err(422, "Send RECEIVED <order> <pieces that arrived>, e.g. RECEIVED 12 190")
         v = svc.signoff(u, _id(w), w[2], " ".join(t.split()[3:]), "final" in w[3:]); d = v["delivery"]
-        return f"Thank you. Order #{v['id']}: {d['delivered']} of {d['ordered']} pieces received. Status: {_st(v)}." + (f"\nHow did the group do? Send RATE {v['id']} <1 to 5>." if v["status"] == "closed" else "")
-    if c == "rate":
-        if len(w) < 3 or not w[2].isdigit(): raise svc.Err(422, "Send RATE <order> <1 to 5>, e.g. RATE 12 5")
-        ops.rate_group(u, _id(w), w[2], " ".join(t.split()[3:])); return "Thank you for rating the group!"
+        return f"Thank you. Order #{v['id']}: {d['delivered']} of {d['ordered']} pieces received. Status: {_st(v)}."
     if c == "cancel": v = svc.cancel(u, _id(w), " ".join(t.split()[2:])); return f"Order #{v['id']} cancelled."
-    if c == "group": PREF[u["id"]] = _id(w); return "Group selected."
+    if c == "group":
+        if len(w) < 2: return convo.change_group(u, auth.norm(u["phone"]))
+        svc.set_preferred_group(u, _id(w)); return "Group selected."
     if (len(w) == 1 and c in ("help", "hi", "hello", "namaste")) or not t: return HELP["buyer"]
-    g = PREF.get(u["id"]) or svc.groups()[0]["id"]; v = svc.submit_order(u, g, t)
+    groups = svc.groups()
+    group_id = u.get("preferred_group_id") or svc.preferred_group(u)
+    if not group_id and len(groups) == 1: group_id = groups[0]["id"]
+    if not group_id:
+        return "Choose a group first. Send CHANGE GROUP to see the available groups."
+    v = svc.submit_order(u, group_id, t)
     return f"Order #{v['id']} sent to {v['group']}. You will get a quote here." + (f"\nPlease clarify: {'; '.join(v['unclear'])}" if v["unclear"] else "")
 
 def _checklist(u, w, t):
@@ -55,6 +47,11 @@ def _checklist(u, w, t):
 
 def _leader(u, t, w, media):
     c = w[0] if w else ""
+    if c == "join":
+        if len(w) != 3 or not w[1].isdigit() or w[2] not in ("1", "2"):
+            raise svc.Err(422, "Send JOIN <request number> 1 to approve or 2 to reject")
+        result = svc.resolve_join_request(u, int(w[1]), w[2] == "1")
+        return f"Join request #{w[1]} {result['status']}."
     if c == "accept": v = svc.accept_quote(u, _id(w)); return f"Recorded: the buyer accepted order #{v['id']} at Rs {v['quote']}. Send PLAN {v['id']}."
     if c == "orders": return "\n".join(_fmt(v) for v in svc.my_orders(u)[:8]) or "No orders."
     if c == "checklist": return _checklist(u, w, t)
@@ -98,41 +95,8 @@ def _leader(u, t, w, media):
     if c == "resolve":
         oid = _id(w); o = _mine(u, oid)
         i = next((k for k, d in enumerate((o or {}).get("disputes", [])) if d["open"]), None)
-        if i is None:
-            with db.S() as s: iss = [x for x in (s.get(db.Order, oid).data.get("issues", []) if s.get(db.Order, oid) else []) if x.get("open")]
-            if iss: ops.resolve_issue(u, oid, iss[0]["i"], " ".join(t.split()[2:])); return "Problem marked as sorted. The member has been told."
-            return "No open dispute or problem on that order."
+        if i is None: return "No open dispute on that order."
         v = svc.resolve_dispute(u, oid, i, " ".join(t.split()[2:]) or "resolved by leader"); return f"Dispute resolved. Order status: {_st(v)}."
-    if c in ("today", "alerts"): return _today(u)
-    if c == "paid":
-        if len(w) < 3: raise svc.Err(422, "Send PAID <order> <rupees>, e.g. PAID 12 5000")
-        m = ops.record_payment(u, _id(w), w[2].replace(",", ""), None, "whatsapp", " ".join(t.split()[3:])); return f"Recorded Rs {w[2]}. Paid so far Rs {m['paid']} of Rs {m['total']}. Balance Rs {m['balance']}."
-    if c == "remind": r = ops.remind_buyer(u, _id(w)); return f"Reminder sent to the buyer for the balance of Rs {r['balance']}."
-    if c == "due":
-        with db.S() as s: rows = [x for x in hub.payouts_view(hub.Ctx(s, u))["money_in"] if float(x["balance"]) > 0]
-        return "\n".join(f"#{x['order_id']} {x['buyer']}: Rs {x['balance']} due" + (f" ({x['days_overdue']} days overdue)" if x["overdue"] else "") for x in rows) or "No buyer owes the group anything right now."
-    if c == "note":
-        if len(w) < 3: raise svc.Err(422, "Send NOTE <order> <your private note>")
-        ops.add_note(u, _id(w), " ".join(t.split()[2:])); return "Private note saved on the order."
-    if c == "team":
-        with db.S() as s: ms = hub.team_view(hub.Ctx(s, u))["members"]
-        return "\n".join(f"{m['name']}: {m['status']}" + (f" ({'; '.join(m['status_reasons'])})" if m["status_reasons"] else "") for m in ms if m["active"]) or "No members yet."
-    if c == "msg":
-        if len(w) < 3: raise svc.Err(422, "Send MSG <member name or ALL> <message>")
-        to = "all" if w[1] == "all" else _member_id(u, w[1]); r = ops.send_message(u, to, " ".join(t.split()[2:])); return f"Message sent to {len(r['results'])} member(s): " + ", ".join(f"{x['name']} {x['status'].replace('_', ' ')}" for x in r["results"])
-    if c == "reassign":
-        if len(w) < 5 or not w[4].isdigit(): raise svc.Err(422, "Send REASSIGN <order> <from name> <to name> <pieces> [stage]")
-        oid = _id(w); o = _mine(u, oid); fid, tid = _member_id(u, w[2]), _member_id(u, w[3])
-        stg = w[5] if len(w) > 5 else next((a["stage"] for a in ((o or {}).get("plan") or {}).get("assignments", []) if a["member"] == fid), "")
-        ops.reassign(u, oid, fid, tid, stg, w[4]); return f"Moved {w[4]} {stg} pieces from {w[2].title()} to {w[3].title()}. Both have been told."
-    if c == "fixed":
-        oid = _id(w)
-        with db.S() as s: iss = [x for x in (s.get(db.Order, oid).data.get("issues", []) if s.get(db.Order, oid) else []) if x.get("open")]
-        if not iss: return "No open problem reported on that order."
-        ops.resolve_issue(u, oid, iss[0]["i"], " ".join(t.split()[2:])); return "Marked as sorted. The member has been told."
-    if c == "stock":
-        with db.S() as s: v = hub.materials_view(hub.Ctx(s, u))
-        return "\n".join(f"{m['name']}: {m['qty']:g} {m['unit']}" for m in v["materials"]) + ("\nShort: " + ", ".join(f"{x['name']} {x['short']:g}" for x in v["shopping"]) if v["shopping"] else "") if v["materials"] else "No materials tracked yet. Add them on the dashboard (Materials tab)."
     return HELP["leader"]
 
 def _seller(u, t, w, media):
@@ -152,9 +116,6 @@ def _seller(u, t, w, media):
     if c == "sample":
         oid = int(w[1]) if len(w) > 1 and w[1].isdigit() else next((x["order_id"] for x in svc.tasks(u) if x["status"] == "in_production"), 0)
         svc.submit_sample(u, oid, " ".join(t.split()[2:]) if len(w) > 1 and w[1].isdigit() else " ".join(t.split()[1:])); return i18n.t("sample_ok", L, o=oid, photo="")
-    if c == "issue":
-        if len(w) < 3 or not w[1].isdigit(): raise svc.Err(422, "Send ISSUE <order> <what is wrong>, e.g. ISSUE 1 need more thread")
-        svc.report_issue(u, int(w[1]), " ".join(t.split()[2:])); return "I have told your leader. She will decide what to do next."
     if c == "checklist": return _checklist(u, w, t)
     if c == "accept": r = svc.accept_task(u, _id(w)); return i18n.t("task_accepted", L, o=_id(w))
     if c == "decline": svc.decline(u, _id(w)); return i18n.t("declined", L)
@@ -163,7 +124,7 @@ def _seller(u, t, w, media):
     return i18n.t("help_seller", L)
 
 def _onboard(phone, t, msg_id):
-    """MaaSakhi-style registration over WhatsApp: language -> name -> role -> skill. Only when OPEN_REGISTRATION=1."""
+    """WhatsApp onboarding; a member joins only after code validation and leader approval."""
     st = ONB.get(phone); w = t.strip().lower()
     if not st: ONB[phone] = {"step": "lang"}; return i18n.t("menu", "en")
     L = st.get("lang", "en")
@@ -175,25 +136,41 @@ def _onboard(phone, t, msg_id):
     if st["step"] == "role":
         if w not in ("1", "2"): return i18n.t("ask_role", L)
         if w == "2": ONB.pop(phone); svc.register_self(phone, st["name"], "buyer", lang=L); return i18n.t("joined", L, name=st["name"]) + "\n" + HELP["buyer"]
-        st["step"] = "skill"; return i18n.t("ask_skill", L)
+        st.update(role="seller", step="skill"); return i18n.t("ask_skill", L)
     if st["step"] == "skill":
         if w not in SKILLS: return i18n.t("ask_skill", L)
-        ONB.pop(phone); svc.register_self(phone, st["name"], "seller", SKILLS[w], L); return i18n.t("joined", L, name=st["name"]) + "\n" + i18n.t("help_seller", L)
+        st.update(skill=SKILLS[w], step="group_code"); return i18n.t("ask_group_code", L)
+    if st["step"] == "group_code":
+        svc.submit_join_request(phone, st["name"], st["skill"], L, t)
+        ONB.pop(phone)
+        return i18n.t("join_waiting", L)
 
 def handle(sender, text, msg_id=None, media=None):
     if msg_id:
         if msg_id in SEEN: return None                       # WhatsApp may redeliver: act once
         SEEN.add(msg_id)
+    phone = auth.norm(sender)
     with db.S() as s:
-        x = s.scalars(select(db.User).where(db.User.phone == auth.norm(sender), db.User.active == True)).first()  # noqa: E712
-        u = {"id": x.id, "name": x.name, "role": x.role, "group_id": x.group_id, "lang": x.lang or "en"} if x else None
+        x = s.scalars(select(db.User).where(db.User.phone == phone, db.User.active == True)).first()  # noqa: E712
+        u = {"id": x.id, "name": x.name, "role": x.role, "group_id": x.group_id, "preferred_group_id": x.preferred_group_id,
+             "phone": x.phone, "lang": x.lang or "en"} if x else None
     t = (text or "").strip()
     if not u:
+        if svc.pending_join_request(phone): return "Your request is still waiting for your group leader."
         if svc.open_registration():
-            try: return _onboard(auth.norm(sender), t, msg_id)
+            try: return _onboard(phone, t, msg_id)
             except svc.Err as e: return f"Not done: {e.msg}"
         return "This number is not registered. Please ask your group leader or mission coordinator to add you."
     w = t.lower().split()
+    if u["role"] == "leader" and w:
+        with db.S() as s:
+            state = s.get(db.ChatState, phone)
+            pending = dict(state.pending_action or {}) if state else {}
+        ids = pending.get("ids", []) if pending.get("type") == "join_request" else []
+        if ids and w[0] in ("1", "2", "yes", "no", "haan", "हाँ", "हां", "ಹೌದು", "ಸರಿ", "ಇಲ್ಲ"):
+            approved = w[0] in ("1", "yes", "haan", "हाँ", "हां", "ಹೌದು", "ಸರಿ")
+            result = svc.resolve_join_request(u, ids[0], approved)
+            return f"Join request #{ids[0]} {result['status']}."
     if w and w[0] == "role" and bootstrap.owner_phone() == auth.norm(sender):         # owner only: act as each role from one phone
         try: r = svc.switch_owner_role(u, w[1] if len(w) > 1 else ""); return f"You are now: {r}. Send HELP to see what you can do."
         except svc.Err as e: return f"Not done: {e.msg}"
@@ -202,12 +179,12 @@ def handle(sender, text, msg_id=None, media=None):
         if not code: return i18n.t("menu", u["lang"])
         svc.set_lang(u, code); return i18n.t("lang_set", code)
     try:
-        r = convo.handle(u, auth.norm(sender), t, w, media)                                   # guided conversation first; typed commands remain the fallback
+        r = convo.handle(u, phone, t, w, media)                                   # guided conversation first; typed commands remain the fallback
         if r is not None: return r
     except svc.Err as e:
         return f"Not done: {e.msg}"
     except Exception:
-        convo._clear(auth.norm(sender)); return "Sorry, something went wrong on my side. Send MENU to start again."
+        convo._clear(phone); return "Sorry, something went wrong on my side. Send MENU to start again."
     try:
         out = {"buyer": _buyer, "leader": _leader, "seller": _seller}.get(u["role"], lambda *_: "Please use the web dashboard.")(u, t, w, media)
         return out + ("\n\nSend MENU for the guided menu." if w == ["help"] else "")

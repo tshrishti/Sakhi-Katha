@@ -63,7 +63,7 @@ def current_user(request: Request):
     with db.S() as s:
         u = s.get(db.User, uid)
         if not u or not u.active: return None
-        return {"id": u.id, "name": u.name, "role": u.role, "group_id": u.group_id, "phone": u.phone, "consented": bool(u.consent_at), "lang": u.lang or "en"}
+        return {"id": u.id, "name": u.name, "role": u.role, "group_id": u.group_id, "phone": u.phone, "consented": bool(u.consent_at)}
 
 def require(*roles):
     def dep(request: Request):

@@ -4,7 +4,7 @@ import re
 
 TEMPLATES = {
     "cloth_bag": {
-        "label": "Cloth bag", "unit": "bag", "words": ["bag", "bags", "jhola", "thaila", "tote"],
+        "label": "Cloth bag", "unit": "bag", "words": ["bag", "bags", "jhola", "thaila", "thaile", "thailay", "tote", "ಚೀಲ", "ಚೀಲಗಳು", "ಬ್ಯಾಗ್"],
         "stages": [{"name": "cutting", "rate": 5, "workers": 1}, {"name": "stitching", "rate": 16, "workers": 2},
                    {"name": "finishing", "rate": 8, "workers": 2}, {"name": "packing", "rate": 4, "workers": 1}],
         "cost": {"material": 38, "minutes": 40, "hourly": 50, "overhead_pct": 8, "margin_pct": 10},

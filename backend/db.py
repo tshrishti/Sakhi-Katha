@@ -1,5 +1,5 @@
 import os, time
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, JSON, Text, UniqueConstraint, select
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, JSON, select
 from sqlalchemy.orm import declarative_base, sessionmaker
 import engine as E
 
@@ -23,7 +23,7 @@ class User(Base):                      # role: buyer | seller (SHG member) | lea
     name = Column(String, nullable=False); role = Column(String, nullable=False); group_id = Column(Integer)
     skills = Column(JSON, default=list); capacity = Column(Integer, default=0)
     active = Column(Boolean, default=True); consent_at = Column(Float); lang = Column(String, default="en")
-    prefs = Column(JSON, default=dict)                 # leader notification preferences, e.g. {"whatsapp_alerts": false}
+    preferred_group_id = Column(Integer)
 
 class Order(Base):
     __tablename__ = "orders"
@@ -45,6 +45,23 @@ class Convo(Base):                     # where each WhatsApp number is in the gu
     __tablename__ = "convos"
     phone = Column(String, primary_key=True); step = Column(String); data = Column(JSON, default=dict); ts = Column(Float)
 
+class ChatState(Base):
+    __tablename__ = "chat_state"
+    phone = Column(String, primary_key=True); step = Column(String); data = Column(JSON, default=dict)
+    pending_action = Column(JSON); history = Column(JSON, default=list); lang = Column(String, default="en")
+    updated_at = Column(Float, nullable=False)
+
+class GroupInvite(Base):
+    __tablename__ = "group_invites"
+    id = Column(Integer, primary_key=True); code = Column(String, unique=True, nullable=False)
+    group_id = Column(Integer, nullable=False); active = Column(Boolean, default=True)
+
+class JoinRequest(Base):
+    __tablename__ = "join_requests"
+    id = Column(Integer, primary_key=True); phone = Column(String, nullable=False); name = Column(String, nullable=False)
+    group_id = Column(Integer, nullable=False); skill = Column(String); lang = Column(String, default="en")
+    status = Column(String, nullable=False, default="pending"); created = Column(Float, nullable=False)
+
 class RateCard(Base):                  # per-group, versioned; status: proposed | active | superseded | rejected
     __tablename__ = "rate_cards"
     id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False); product = Column(String, nullable=False)
@@ -52,32 +69,6 @@ class RateCard(Base):                  # per-group, versioned; status: proposed 
     stages = Column(JSON, nullable=False); cost = Column(JSON, nullable=False); note = Column(String, default="")
     leader_ok = Column(Boolean, default=False); member_ok = Column(JSON, default=list)
     created = Column(Float); approved_at = Column(Float)
-
-class BuyerProfile(Base):              # the leader's private CRM card for a buyer: key is "u:<user id>" (registered buyer) or "n:<name>" (placed on their behalf)
-    __tablename__ = "buyer_profiles"
-    __table_args__ = (UniqueConstraint("group_id", "key"),)
-    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False); key = Column(String, nullable=False)
-    name = Column(String); phone = Column(String); addresses = Column(JSON, default=list); notes = Column(Text, default=""); created = Column(Float)
-
-class Message(Base):                   # leader -> member notes sent over WhatsApp, with delivery status (queued/sent/delivered/read/failed/not_connected)
-    __tablename__ = "messages"
-    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False); sender_id = Column(Integer); to_id = Column(Integer)
-    body = Column(Text, nullable=False); status = Column(String, default="queued"); sid = Column(String); ts = Column(Float); batch = Column(String)
-
-class Material(Base):
-    __tablename__ = "materials"
-    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False); name = Column(String, nullable=False); unit = Column(String, default="pcs")
-    qty = Column(Float, default=0); per_piece = Column(JSON, default=dict)      # per_piece: {"cloth_bag": 0.5, ...} units of this material per finished piece
-    active = Column(Boolean, default=True)
-
-class Supplier(Base):
-    __tablename__ = "suppliers"
-    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False); name = Column(String, nullable=False); phone = Column(String); note = Column(String, default="")
-
-class Purchase(Base):
-    __tablename__ = "purchases"
-    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False); material_id = Column(Integer, nullable=False)
-    supplier_id = Column(Integer); qty = Column(Float, nullable=False); cost = Column(Float, nullable=False); ts = Column(Float); note = Column(String, default="")
 
 class DBLedger:
     """Persistent, append-only, hash-chained audit log. Same chain rules as engine.Ledger."""
@@ -104,9 +95,9 @@ def ensure_columns():
     """create_all never alters existing tables: add columns introduced after the first deploy."""
     from sqlalchemy import inspect, text
     try:
-        have = {c["name"] for c in inspect(engine).get_columns("users")}
-        if "lang" not in have:
+        user_columns = {c["name"] for c in inspect(engine).get_columns("users")}
+        if "lang" not in user_columns:
             with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN lang VARCHAR DEFAULT 'en'"))
-        if "prefs" not in have:
-            with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN prefs JSON" if not IS_SQLITE else "ALTER TABLE users ADD COLUMN prefs JSON"))
+        if "preferred_group_id" not in user_columns:
+            with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN preferred_group_id INTEGER"))
     except Exception: pass

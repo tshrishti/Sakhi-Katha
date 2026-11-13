@@ -61,13 +61,20 @@ def _finish(order, unclear, today):
 
 def _rules(parts):
     import engine as E
+    import defaults
     o = {k: None for k in ("product", "qty", "size", "colour", "specs", "offered_price", "deadline_days", "delivery_date", "location", "packaging")}; unclear = []
     for p in parts:                                                                          # later messages overwrite earlier ones
         pm = re.match(r"(?i)\s*product:\s*(.+)", p)
-        if pm: o["product"] = pm.group(1).strip()[:60]; continue
+        if pm:
+            key = defaults.detect(pm.group(1))
+            o["product"] = defaults.TEMPLATES[key]["label"] if key else None
+            if not key: unclear.append("product")
+            continue
         r = E.parse_order(p)
         for k, v in r["order"].items():
-            if v is not None: o[k] = v
+            if k in o and v is not None: o[k] = v
+        key = defaults.detect(p)
+        if key: o["product"] = defaults.TEMPLATES[key]["label"]
         for key, pat in (("qty", r"(?:quantity|qty|pieces|pcs)\s*[:=]?\s*(\d+)"), ("offered_price", r"(?:price|rate|cost)\s*[:=]?\s*(?:rs\.?|₹)?\s*(\d+)"), ("deadline_days", r"(?:days?|din)\s*[:=]?\s*(\d+)")):
             m = re.search(pat, p.lower())                                                    # short corrections like "quantity 250, price 65"
             if m: o[key] = int(m.group(1))

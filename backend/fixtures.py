@@ -28,6 +28,7 @@ def seed_test_world():
     import db
     with db.S() as s:
         g = db.Group(name="Test SHG", village="V", block="B", district="D"); s.add(g); s.flush()
+        s.add(db.GroupInvite(code="482913", group_id=g.id, active=True))
         s.add(db.User(phone="+919000000009", name="Test Officer", role="officer"))
         s.add(db.User(phone="+919000000001", name="Test Leader", role="leader", group_id=g.id))
         s.add(db.User(phone="+919000000002", name="Test Buyer", role="buyer"))

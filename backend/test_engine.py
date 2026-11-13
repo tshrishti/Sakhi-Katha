@@ -32,6 +32,17 @@ def test_parse_flags_unclear():
     assert r["order"]["qty"] == 200 and r["order"]["offered_price"] == 60 and r["order"]["deadline_days"] == 5
     assert any("same as" in u for u in r["unclear"])
 
+def test_order_fallback_understands_common_language_and_order_phrases():
+    cloth = E.parse_order("Need 200 cloth bags, Rs 60 per piece, by 12 Nov 2027")
+    assert cloth["order"]["product"] == "Cloth bag"
+    assert cloth["order"]["qty"] == 200 and cloth["order"]["offered_price"] == 60
+    assert cloth["order"]["delivery_date"] == "2027-11-12" and cloth["order"]["deadline_days"] > 0
+    hinglish = E.parse_order("mujhe do sau thaile chahiye, 60 rupaye, 5 din mein")
+    assert hinglish["order"]["qty"] == 200 and hinglish["order"]["offered_price"] == 60
+    assert hinglish["order"]["deadline_days"] == 5
+    kannada = E.parse_order("ನೂರು ಚೀಲ ಬೇಕು, 50 per piece, 10 ದಿನ")
+    assert kannada["order"]["qty"] == 100 and kannada["order"]["product"] == "Cloth bag"
+
 
 def test_feasibility_options_when_not_viable():
     members = [{"id": 1, "name": "A", "skills": ["cutting", "stitching"], "capacity": 20}]

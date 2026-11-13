@@ -22,4 +22,7 @@ def ensure():
             if role not in ("leader", "buyer", "seller", "officer"): role = "leader"
             s.add(db.User(phone=phone, name=os.getenv("OWNER_NAME", "Owner"), role=role, group_id=g.id if role in ("leader", "seller") else None,
                           skills=["cutting", "stitching", "finishing", "packing"] if role == "seller" else [], capacity=30 if role == "seller" else 0, lang=os.getenv("OWNER_LANG", "en")))
+        join_code = os.getenv("GROUP_JOIN_CODE", "").strip()
+        if join_code and not s.scalars(select(db.GroupInvite).where(db.GroupInvite.code == join_code)).first():
+            s.add(db.GroupInvite(code=join_code, group_id=g.id, active=True))
         s.commit()

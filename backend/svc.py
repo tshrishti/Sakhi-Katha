@@ -2,7 +2,7 @@
 import math, os, time
 from sqlalchemy import select
 import db, engine as E, i18n, llm, notify, screening
-import defaults, fairness, money, ratecards
+import defaults, ratecards
 
 LED = db.DBLedger()
 QUORUM = int(os.getenv("PAYOUT_MEMBER_QUORUM", "2"))   # members who must approve besides the leader
@@ -42,15 +42,13 @@ def _order(s, oid, user):
     return o
 def _tell(s, group_id, role, text):
     for u in s.scalars(select(db.User).where(db.User.group_id == group_id, db.User.role == role, db.User.active == True)):  # noqa: E712
-        if role == "leader" and (u.prefs or {}).get("whatsapp_alerts") is False: continue         # she turned WhatsApp alerts off in her profile; the dashboard still shows everything
         notify.send(u.phone, text)
 def _view(s, o, user):
     d = o.data
     v = {"id": o.id, "status": o.status, "order": d["order"], "unclear": d.get("unclear", []), "quote": d.get("quote"), "product": (d.get("rate_card") or {}).get("product", defaults.DEFAULT_PRODUCT), "delivery": _dview(o), "due_at": o.data.get("due_at"), "days_left": _days_left(o), "task_accepted": o.data.get("task_accepted", [])}
     pg = _progress(o)
     if user["role"] == "buyer":                         # buyers never see cost, plan, members or pay: only how far along the work is
-        g = s.get(db.Group, o.group_id); return {**v, "group": g.name if g else "", "progress_pct": pg["pct"], "money": money.public(o, time.time()) if o.status in money.OWED_FROM else None,
-                                                  "can_rate": o.status == "closed" and not o.data.get("rating"), "rating": (o.data.get("rating") or {}).get("stars")}
+        g = s.get(db.Group, o.group_id); return {**v, "group": g.name if g else "", "progress_pct": pg["pct"]}
     q = [{**{k: x[k] for k in x if k != "photo"}, "has_photo": bool(x.get("photo"))} for x in d.get("quality", [])]
     return {**v, "rate_card": {k: (d.get("rate_card") or ratecards.default_card(defaults.DEFAULT_PRODUCT)).get(k) for k in ("product", "version", "source")}, "price": d.get("price"), "plan": d.get("plan"), "payout": d.get("payout"), "approvals": d.get("approvals"),
             "disputes": d.get("disputes", []), "declined": d.get("declined", []), "quality": q, "progress": pg, "risk": d.get("risk"),
@@ -86,7 +84,41 @@ def groups():
             n = sum(1 for o in s.scalars(select(db.Order).where(db.Order.group_id == g.id)) if o.status == "closed")
             out.append({"id": g.id, "name": g.name, "village": g.village, "orders_delivered": n})
         return out
-def submit_order(user, group_id, text, pre=None, for_buyer=None):
+
+def preferred_group(user):
+    with db.S() as s:
+        u = s.get(db.User, user["id"])
+        return u.preferred_group_id if u else None
+
+def set_preferred_group(user, group_id):
+    if user["role"] != "buyer": raise Err(403, "Only buyers can select an order group")
+    try: group_id = int(group_id)
+    except (TypeError, ValueError): raise Err(422, "Choose a listed group")
+    with db.S() as s:
+        if not s.get(db.Group, group_id): raise Err(404, "Group not found")
+        u = s.get(db.User, user["id"])
+        u.preferred_group_id = group_id
+        s.commit()
+    return {"ok": True, "group_id": group_id}
+
+def last_order(user):
+    if user["role"] != "buyer": raise Err(403, "Only buyers can repeat an order")
+    with db.S() as s:
+        order = s.scalars(select(db.Order).where(db.Order.buyer_id == user["id"]).order_by(db.Order.id.desc())).first()
+        return {"order": dict(order.data.get("order") or {}), "group_id": order.group_id} if order else None
+
+def handoff(user, group_id, message):
+    """Notify only the chosen group's active leaders; never broadcast buyer details across groups."""
+    if not group_id and user.get("role") == "buyer":
+        rows = groups()
+        if len(rows) == 1: group_id = rows[0]["id"]
+    if not group_id: return 0
+    with db.S() as s:
+        leaders = list(s.scalars(select(db.User).where(db.User.group_id == group_id, db.User.role == "leader", db.User.active == True)))  # noqa: E712
+        for leader in leaders: notify.send(leader.phone, message)
+        return len(leaders)
+
+def submit_order(user, group_id, text, pre=None):
     """pre = details already extracted and confirmed in the WhatsApp conversation: {"order": {...}, "unclear": [...], "evidence": {...}}."""
     ex = {"order": pre["order"], "unclear": pre.get("unclear", [])} if pre else llm.extract_order(text); od = ex["order"]
     missing = [k for k in ("qty", "offered_price", "deadline_days") if od.get(k) is None]
@@ -97,7 +129,7 @@ def submit_order(user, group_id, text, pre=None, for_buyer=None):
         data = {"order": od, "unclear": ex["unclear"], "declined": [], "disputes": [], "checklist": screening.build_checklist(od)}
         if pre and pre.get("evidence"): data["evidence"] = pre["evidence"]           # original text / transcript / photo / PDF text the order was read from
         if user["role"] == "leader": data["on_behalf"] = True                          # the leader placed it for a buyer (named in the order)
-        o = db.Order(group_id=g.id, buyer_id=for_buyer or user["id"], status="submitted", created=time.time(), data=data)
+        o = db.Order(group_id=g.id, buyer_id=user["id"], status="submitted", created=time.time(), data=data)
         data["product_key"] = defaults.detect(od.get("product")) or defaults.detect(text) or defaults.DEFAULT_PRODUCT
         data["rate_card"] = ratecards.active(s, g.id, data["product_key"])
         s.add(o); s.flush(); _log(s, o, "order.submitted", user, {**od, "rate_card": {"product": data["rate_card"]["product"], "version": data["rate_card"]["version"]}}); s.commit()
@@ -148,9 +180,8 @@ def plan(user, oid):
         ms = [m for m in s.scalars(select(db.User).where(db.User.group_id == o.group_id, db.User.role == "seller", db.User.active == True))  # noqa: E712
               if m.id not in dec]
         if not ms: raise Err(409, "No available members")
-        hist, _n = fairness.history(s, o.group_id, exclude_oid=o.id)                       # who earned least across the last 5 orders goes first
         a = E.allocate(o.data["order"]["qty"], _card(o)["stages"], [{"id": m.id, "name": m.name, "skills": m.skills or [], "capacity": m.capacity or 1} for m in ms],
-                       days=o.data["order"]["deadline_days"], history=hist)
+                       days=o.data["order"]["deadline_days"])
         if not a["feasible"]:
             od = o.data["order"]; rc = _card(o); p = E.price_check(od["qty"], **rc["cost"], offered=od["offered_price"])
             a["options"] = _options(od, rc, p, ms, dec, a)
@@ -197,20 +228,14 @@ def resolve_dispute(user, oid, idx, note=""):
         ds[idx].update(open=False, note=str(note)[:300]); _set(o, disputes=ds); _log(s, o, "dispute.resolved", user, {"idx": idx}); _settle(s, o, user); s.commit(); return _view(s, o, user)
 def add_member(user, phone, name, skills, capacity):
     from auth import norm
-    _leader_only(user)
-    try: cap = int(capacity or 0); assert 0 <= cap <= 10000
-    except Exception: raise Err(422, "Daily capacity must be a number of pieces")
-    if not str(name or "").strip(): raise Err(422, "Please give the member's name")
-    if len("".join(c for c in str(phone) if c.isdigit())) < 10: raise Err(422, "Please give a 10-digit phone number")
     with db.S() as s:
         p = norm(phone)
         if s.scalars(select(db.User).where(db.User.phone == p)).first(): raise Err(409, "Phone already registered")
-        m = db.User(phone=p, name=str(name).strip()[:80], role="seller", group_id=user["group_id"], skills=[str(k).strip().lower() for k in (skills or []) if str(k).strip()], capacity=cap); s.add(m); s.flush()
-        LED.append("member.added", {"name": m.name, "id": m.id}, f"{user['role']}:{user['id']}", s=s); s.commit()
-        return {"ok": True, "id": m.id}
+        s.add(db.User(phone=p, name=str(name)[:80], role="seller", group_id=user["group_id"], skills=list(skills or []), capacity=int(capacity or 0))); s.commit()
+        return {"ok": True}
 def members(user):
     with db.S() as s:
-        return [{"id": m.id, "name": m.name, "skills": m.skills, "capacity": m.capacity, "phone": m.phone if user["role"] == "leader" else None}
+        return [{"id": m.id, "name": m.name, "skills": m.skills, "capacity": m.capacity}
                 for m in s.scalars(select(db.User).where(db.User.group_id == user["group_id"], db.User.role == "seller", db.User.active == True))]  # noqa: E712
 
 # ---- seller (SHG member): sees ONLY her own lines ----
@@ -252,8 +277,7 @@ def report_issue(user, oid, text):
     with db.S() as s:
         o = _order(s, oid, user); text = str(text).strip()[:300]
         if not text: raise Err(422, "Please describe the problem")
-        iss = list(o.data.get("issues", [])); iss.append({"i": len(iss), "uid": user["id"], "name": user["name"], "text": text, "open": True, "ts": time.time()}); _set(o, issues=iss)
-        _log(s, o, "member.issue", user, {"text": text, "i": len(iss) - 1}); s.commit()
+        _log(s, o, "member.issue", user, {"text": text}); s.commit()
         _tell(s, o.group_id, "leader", f"{user['name']} reports a problem in order #{o.id}: {text}")
         return {"ok": True}
 def dispute(user, oid, reason):
@@ -382,9 +406,9 @@ def photo(user, oid, i):
         if not 0 <= i < len(q) or not q[i].get("photo"): raise Err(404, "No photo")
         return q[i]["photo"]
 
-def _risk_calc(s, o, dl, cap=None):
+def _risk_calc(s, o, dl):
     a = (o.data.get("plan") or {}).get("assignments", [])
-    cap = cap if cap is not None else {m.id: (m.capacity or 1) for m in s.scalars(select(db.User).where(db.User.group_id == o.group_id))}
+    cap = {m.id: (m.capacity or 1) for m in s.scalars(select(db.User).where(db.User.group_id == o.group_id))}
     per, nst = {}, {}
     for x in a: nst[x["member"]] = nst.get(x["member"], 0) + 1
     for x in a: per[x["stage"]] = per.get(x["stage"], 0) + max(cap.get(x["member"], 1) // nst[x["member"]], 1)   # a woman on two stages splits her day between them
@@ -411,27 +435,15 @@ def risk(user, oid, days_left=None):
 TASK_LEAD_DAYS = int(os.getenv("TASK_REMIND_DAYS", "1"))          # remind members when this many days (or fewer) remain
 SAMPLE_NUDGE_MIN = int(os.getenv("SAMPLE_NUDGE_MINUTES", "60"))    # nudge the leader before the officer escalation fires
 PAYOUT_NUDGE_H = int(os.getenv("PAYOUT_NUDGE_HOURS", "24"))
-STALE_H = float(os.getenv("STALE_HOURS", "24"))                    # an order in production with no progress report for this long is "stale"
 COOLDOWN_H = int(os.getenv("REMINDER_COOLDOWN_HOURS", "24"))       # the same reminder is not repeated inside this window
 def _once(o, key, now):
     rem = dict(o.data.get("reminders", {}))
     if now - rem.get(key, 0) < COOLDOWN_H * 3600: return False
     rem[key] = now; _set(o, reminders=rem); return True
-def stale_since(s, o, now):
-    """When the last progress report (or the start of production) was, if that is longer ago than STALE_HOURS and work is still open; else None."""
-    if o.status != "in_production" or o.data.get("due_at") is None: return None
-    pg = _progress(o)
-    if pg["rows"] and all(r["done"] >= r["units"] for r in pg["rows"]): return None
-    start = o.data["due_at"] - int(o.data["order"]["deadline_days"]) * 86400
-    last = max([start] + [e.ts for e in s.scalars(select(db.LedgerEvent).where(db.LedgerEvent.order_id == o.id, db.LedgerEvent.type == "progress.reported"))])
-    return last if now - last >= STALE_H * 3600 else None
 def run_reminders(now=None):
     """Send every due reminder once per cooldown. Returns counts per type. Idempotent: safe to call every few minutes."""
-    now = time.time() if now is None else now; c = {"task_due": 0, "deadline_risk": 0, "sample_review": 0, "payout_approval": 0, "stale": 0, "payment_due": 0}
+    now = time.time() if now is None else now; c = {"task_due": 0, "deadline_risk": 0, "sample_review": 0, "payout_approval": 0}
     with db.S() as s:
-        for o in s.scalars(select(db.Order).where(db.Order.status.in_(money.OWED_FROM))):                  # buyer money overdue: nudge the leader (the buyer is only reminded when she presses Remind)
-            m = money.summary(o, now)
-            if m["overdue"] and _once(o, "money", now): _tell(s, o.group_id, "leader", f"Order #{o.id}: the buyer owes Rs {m['balance']} ({m['days_overdue']} day(s) overdue). Send REMIND {o.id} to remind the buyer."); c["payment_due"] += 1
         for o in s.scalars(select(db.Order).where(db.Order.status.in_(("in_production", "payout_pending")))):
             dl = _days_left(o, now)
             if o.status == "in_production":
@@ -447,8 +459,6 @@ def run_reminders(now=None):
                         LED.append("risk.alert", {"shortfall": r["shortfall"], "days_left": r["days_left"]}, "system:reminders", o.id, s=s)
                         _tell(s, o.group_id, "leader", f"Order #{o.id}: at the current pace you are about {r['shortfall']} pieces short, with {r['days_left']} day(s) to the delivery date. Open the order to see options.")
                         c["deadline_risk"] += 1
-                if stale_since(s, o, now) is not None and _once(o, "stale", now):
-                    _tell(s, o.group_id, "leader", f"Order #{o.id}: nobody has reported progress for over {int(STALE_H)} hours. Ask the members what is happening (send MSG all <text>)."); c["stale"] += 1
                 old = [i for i, q in enumerate(o.data.get("quality", [])) if q["status"] == "pending" and now - q.get("ts", 0) >= SAMPLE_NUDGE_MIN * 60 and _once(o, f"sample:{i}", now)]
                 if old: _tell(s, o.group_id, "leader", f"Order #{o.id}: {len(old)} sample(s) are waiting for your review. Members cannot make more until you pass or send them back."); c["sample_review"] += len(old)
             else:
@@ -505,6 +515,74 @@ def register_self(phone, name, role, skill=None, lang="en"):
                     skills=[skill] if (member and skill) else [], capacity=30 if member else 0, consent_at=time.time(), lang=lang)
         s.add(u); s.flush(); LED.append("consent.recorded", {"purpose": "order processing and earnings records", "via": "whatsapp"}, f"{u.role}:{u.id}", s=s); s.commit()
         return {"id": u.id, "name": u.name, "role": u.role}
+
+def submit_join_request(phone, name, skill, lang, code):
+    """Create a pending member request only for a valid group invite code."""
+    from auth import norm
+    phone = norm(phone)
+    code = str(code or "").strip()
+    with db.S() as s:
+        invite = s.scalars(select(db.GroupInvite).where(db.GroupInvite.code == code, db.GroupInvite.active == True)).first()  # noqa: E712
+        if not invite: raise Err(422, "That group code was not recognized. Ask your leader for the current code.")
+        if s.scalars(select(db.User).where(db.User.phone == phone)).first():
+            raise Err(409, "This number is already registered. Please contact your group leader.")
+        pending = s.scalars(select(db.JoinRequest).where(db.JoinRequest.phone == phone, db.JoinRequest.status == "pending")).first()
+        if pending: raise Err(409, "Your request is already waiting for a leader.")
+        request = db.JoinRequest(phone=phone, name=str(name).strip()[:40] or "Member", group_id=invite.group_id,
+                                 skill=str(skill or "")[:40], lang=lang, status="pending", created=time.time())
+        s.add(request); s.flush()
+        leaders = list(s.scalars(select(db.User).where(db.User.group_id == invite.group_id, db.User.role == "leader", db.User.active == True)))  # noqa: E712
+        for leader in leaders:
+            state = s.get(db.ChatState, leader.phone) or db.ChatState(phone=leader.phone, updated_at=time.time())
+            pending_action = dict(state.pending_action or {})
+            ids = list(pending_action.get("ids", [])) if pending_action.get("type") == "join_request" else []
+            if request.id not in ids: ids.append(request.id)
+            state.pending_action = {"type": "join_request", "ids": ids}
+            state.updated_at = time.time()
+            s.merge(state)
+            if len(ids) == 1:
+                notify.send(leader.phone, f"Join request #{request.id}: {request.name} wants to join with skill {request.skill or 'not specified'}. Reply 1 to approve or 2 to reject.")
+        s.commit()
+        return {"ok": True, "request_id": request.id, "group_id": invite.group_id}
+
+def pending_join_request(phone):
+    from auth import norm
+    with db.S() as s:
+        return bool(s.scalars(select(db.JoinRequest).where(db.JoinRequest.phone == norm(phone),
+                                                           db.JoinRequest.status == "pending")).first())
+
+def resolve_join_request(user, request_id, approve):
+    """A group's leader alone can approve or reject its pending member requests."""
+    if user["role"] != "leader": raise Err(403, "Only the group leader can review join requests")
+    with db.S() as s:
+        request = s.get(db.JoinRequest, int(request_id))
+        if not request or request.group_id != user["group_id"] or request.status != "pending":
+            raise Err(404, "Join request not found")
+        existing = s.scalars(select(db.User).where(db.User.phone == request.phone)).first()
+        if existing: raise Err(409, "That phone number is already registered")
+        if approve:
+            member = db.User(phone=request.phone, name=request.name, role="seller", group_id=request.group_id,
+                             skills=[request.skill] if request.skill else [], capacity=30, active=True, lang=request.lang)
+            s.add(member); s.flush()
+            LED.append("member.join_approved", {"request_id": request.id, "skill": request.skill}, f"leader:{user['id']}", s=s)
+            request.status = "approved"
+            notify.send(request.phone, i18n.t("join_approved", request.lang, name=request.name))
+        else:
+            request.status = "rejected"
+            LED.append("member.join_rejected", {"request_id": request.id}, f"leader:{user['id']}", s=s)
+            notify.send(request.phone, i18n.t("join_rejected", request.lang))
+        leader = s.get(db.User, user["id"])
+        state = s.get(db.ChatState, leader.phone) if leader else None
+        if state and (state.pending_action or {}).get("type") == "join_request":
+            ids = [rid for rid in state.pending_action.get("ids", []) if rid != request.id]
+            state.pending_action = {"type": "join_request", "ids": ids} if ids else None
+            state.updated_at = time.time()
+            if ids:
+                following = s.get(db.JoinRequest, ids[0])
+                if following and following.status == "pending":
+                    notify.send(leader.phone, f"Join request #{following.id}: {following.name} wants to join with skill {following.skill or 'not specified'}. Reply 1 to approve or 2 to reject.")
+        s.commit()
+        return {"ok": True, "status": request.status, "name": request.name}
 
 ROLES = ("buyer", "leader", "seller", "officer")
 def switch_owner_role(user, role):
@@ -629,7 +707,6 @@ def signoff(user, oid, received, note="", final=False):
         _ndv(o, shipments=sh, delivered=tot)
         done = tot >= qty or bool(final)
         _set(o, "closed" if done else "partially_delivered")
-        if done: _set(o, closed_at=time.time())
         _log(s, o, "delivery.signed_off", user, {"i": cur["i"], "received": n, "sent": cur["qty"], "delivered": tot, "of": qty, "accepted_short": bool(final and tot < qty)}); s.commit()
         _tell(s, o.group_id, "leader", f"Order #{o.id}: buyer received {n} of {cur['qty']} pieces ({tot}/{qty} in total). " + ("Order closed." if done else f"{qty - tot} still owed: pack them and send READY {o.id} <pieces>."))
         return _view(s, o, user)

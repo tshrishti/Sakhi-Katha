@@ -15,12 +15,4 @@ async function boot(role,title){
   if(!u.consented)document.body.insertAdjacentHTML('beforeend',`<div class="modal" id="cm"><div class="card"><h2>Your data, your consent</h2>
    <p>Sakhi Khata keeps your orders and earnings records so your group can price, plan and pay fairly. Members see only their own pay. Officers see only totals. You can ask your group leader to correct or remove your records.</p>
    <button onclick="api('/me/consent','POST').then(()=>$('#cm').remove())">I agree</button> <button class="red" onclick="logout()">No, log out</button></div></div>`);
-  
-  // Live view: WhatsApp changes are already in the database; re-read them every 8s. Never while someone is typing.
-  setInterval(async()=>{
-    if(document.hidden||typeof load!=='function')return;
-    if([...document.querySelectorAll('input,textarea')].some(e=>e===document.activeElement||(e.type!=='checkbox'&&e.value&&e.value!==e.defaultValue)))return;
-    const sel=[...document.querySelectorAll('select')].map(e=>e.value);
-    try{await load();document.querySelectorAll('select').forEach((e,i)=>{if(sel[i]!==undefined)e.value=sel[i]})}catch(_){}
-  },8000);
   return u}

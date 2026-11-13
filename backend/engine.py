@@ -1,24 +1,113 @@
 """Sakhi Khata engine: deterministic money, fairness and audit logic.
 The LLM never touches these numbers. It only extracts, plans and explains."""
 from decimal import Decimal as D, ROUND_HALF_UP
-import hashlib, json, re, time
+import datetime, hashlib, json, re, time
 import defaults
 
 def q(x):
     return D(x).quantize(D("0.01"), rounding=ROUND_HALF_UP)
 
 # ---------- 1. messy order -> structured order (rule-based fallback; plug an LLM in here) ----------
+_NUMBER_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+    "ek": 1, "aik": 1, "do": 2, "teen": 3, "tin": 3, "char": 4, "chaar": 4, "panch": 5,
+    "paanch": 5, "cheh": 6, "chhah": 6, "saat": 7, "aath": 8, "nau": 9, "das": 10,
+    "gyarah": 11, "barah": 12, "baarah": 12, "terah": 13, "chaudah": 14, "pandrah": 15,
+    "solah": 16, "satrah": 17, "atharah": 18, "unnis": 19, "bees": 20, "tees": 30,
+    "chalis": 40, "pachaas": 50, "saath": 60, "sattar": 70, "assi": 80, "nabbe": 90,
+    "sau": 100, "hundred": 100, "hazaar": 1000, "thousand": 1000,
+    "೧": 1, "ಒಂದು": 1, "ಎರಡು": 2, "ಮೂರು": 3, "ನಾಲ್ಕು": 4, "ಐದು": 5, "ಆರು": 6,
+    "ಏಳು": 7, "ಎಂಟು": 8, "ಒಂಬತ್ತು": 9, "ಹತ್ತು": 10, "ನೂರು": 100, "ಸಾವಿರ": 1000,
+    "एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पांच": 5, "पाँच": 5, "छह": 6, "सात": 7,
+    "आठ": 8, "नौ": 9, "दस": 10, "बीस": 20, "तीस": 30, "चालीस": 40, "पचास": 50,
+    "साठ": 60, "सत्तर": 70, "अस्सी": 80, "नब्बे": 90, "सौ": 100, "हजार": 1000,
+}
+
+def _spoken_number(words):
+    total = current = 0
+    for word in words:
+        value = _NUMBER_WORDS.get(word.lower())
+        if value is None:
+            return None
+        if value == 100:
+            current = max(current, 1) * 100
+        elif value == 1000:
+            total += max(current, 1) * 1000
+            current = 0
+        else:
+            current += value
+    value = total + current
+    return value if value > 0 else None
+
+def _deadline_date(text, today=None):
+    months = {m.lower(): i for i, m in enumerate(
+        ("", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")) if m}
+    months.update({k[:3]: v for k, v in list(months.items())})
+    match = re.search(r"\b(?:by|before|on)\s+(\d{1,2})\s+([a-z]+)(?:\s+(\d{4}))?\b", text, re.I)
+    if not match:
+        return None, None
+    day, month_name, year = match.groups()
+    month = months.get(month_name.lower())
+    if not month:
+        return None, None
+    today = today or datetime.date.today()
+    year = int(year or today.year)
+    try:
+        deadline = datetime.date(year, month, int(day))
+        if not match.group(3) and deadline < today:
+            deadline = deadline.replace(year=year + 1)
+    except ValueError:
+        return None, None
+    days = (deadline - today).days
+    return (deadline.isoformat(), days) if days > 0 else (None, None)
+
 def parse_order(text):
-    t = text.lower()
-    qty = re.search(r"(\d+)\s*(?:" + "|".join(defaults.UNIT_WORDS) + r")\b", t)
-    price = re.search(r"(?:rs\.?|₹|rupees?)\s*(\d+)", t) or re.search(r"(\d+)\s*(?:rs|rupees?|rupaye)", t)
-    days = re.search(r"(\d+)\s*(?:days?|din)", t)
-    week = re.search(r"week|hafte", t)
+    t = (text or "").lower()
+    units = "|".join(re.escape(w) for w in defaults.UNIT_WORDS)
+    qty = re.search(rf"(?<!\w)(\d[\d,]*)\s+(?:(?:[\w'-]+)\s+){{0,3}}(?:{units})\b", t, re.I)
+    before_qty = t[:qty.start()] if qty else ""
+    quantity = int(qty.group(1).replace(",", "")) if qty and not re.search(
+        r"(?:rs\.?|₹|rupees?|rupaye|per|price|rate)\s*$", before_qty, re.I
+    ) and not re.search(r"\bper\s+", qty.group(0), re.I) else None
+    if quantity is None:
+        unit_match = re.search(rf"(?:{units})\b", t, re.I)
+        if unit_match:
+            before = [word.strip(".,!?;:") for word in t[:unit_match.start()].split()][-5:]
+            for modifiers in range(min(3, len(before)) + 1):
+                number_end = len(before) - modifiers
+                for size in range(min(4, number_end), 0, -1):
+                    quantity = _spoken_number(before[number_end-size:number_end])
+                    if quantity is not None:
+                        break
+                if quantity is not None: break
+    price = (re.search(r"(?:rs\.?|₹)\s*(\d[\d,]*)", t) or
+             re.search(r"(\d[\d,]*)\s*(?:/-|rupees?|rupaye|per\s+(?:piece|pc|bag|unit|each))", t))
+    price_value = int(price.group(1).replace(",", "")) if price else None
+    days = re.search(r"(\d+)\s*(?:days?|din|दिन|ದಿನ)\b", t)
+    day_count = int(days.group(1)) if days else None
+    if not days:
+        day_match = re.search(r"([\w'-]+(?:[\s-]+[\w'-]+){0,2})\s*(?:days?|din|दिन|ದಿನ)\b", t, re.I)
+        if day_match:
+            day_words = re.findall(r"[\w'-]+", day_match.group(1), re.UNICODE)
+            for size in range(min(3, len(day_words)), 0, -1):
+                parsed = _spoken_number(day_words[-size:])
+                if parsed:
+                    day_count = parsed
+                    break
+    week = re.search(r"next\s+week|week|hafte|हफ्ते", t)
+    delivery_date, date_days = _deadline_date(t)
+    product_key = defaults.detect(t)
     colour = next((c for c in ("blue", "red", "green", "black", "white", "yellow") if c in t), None)
     order = {
-        "qty": int(qty.group(1)) if qty else None,
-        "offered_price": int(price.group(1)) if price else None,
-        "deadline_days": int(days.group(1)) if days else (7 if week else None),
+        "product": defaults.TEMPLATES[product_key]["label"] if product_key else None,
+        "qty": quantity,
+        "offered_price": price_value,
+        "deadline_days": day_count if day_count is not None else (date_days if date_days else (7 if week else None)),
+        "delivery_date": delivery_date,
         "colour": colour,
     }
     unclear = [k for k, v in order.items() if v is None]
