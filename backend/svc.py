@@ -1,5 +1,5 @@
 """Business rules shared by the REST dashboards and the WhatsApp bot. Every function checks the caller's role and scope."""
-import math, os, time
+import hashlib, math, os, time
 from sqlalchemy import func, select
 import db, engine as E, i18n, llm, notify, screening
 import defaults, ratecards
@@ -10,6 +10,9 @@ ALL_STAGES = list(dict.fromkeys(st["name"] for t in defaults.TEMPLATES.values() 
 def _card(o):
     """The rate card this order was priced on (snapshot). Orders made before rate cards existed use the cloth-bag default."""
     return o.data.get("rate_card") or ratecards.default_card(defaults.DEFAULT_PRODUCT)
+def _product_key(value):
+    value = str(value or "").strip().lower()
+    return value if value in defaults.TEMPLATES else defaults.detect(value)
 def _snapshot(s, o):
     od = o.data["order"]; key = defaults.detect(od.get("product")) or defaults.detect((o.data.get("evidence") or {}).get("text", "")) or o.data.get("product_key") or defaults.DEFAULT_PRODUCT
     _set(o, product_key=key, rate_card=ratecards.active(s, o.group_id, key))
@@ -48,7 +51,13 @@ def _view(s, o, user):
     v = {"id": o.id, "status": o.status, "order": d["order"], "unclear": d.get("unclear", []), "quote": d.get("quote"), "product": (d.get("rate_card") or {}).get("product", defaults.DEFAULT_PRODUCT), "delivery": _dview(o), "due_at": o.data.get("due_at"), "days_left": _days_left(o), "task_accepted": o.data.get("task_accepted", [])}
     pg = _progress(o)
     if user["role"] == "buyer":                         # buyers never see cost, plan, members or pay: only how far along the work is
-        g = s.get(db.Group, o.group_id); return {**v, "group": g.name if g else "", "progress_pct": pg["pct"]}
+        g = s.get(db.Group, o.group_id)
+        payments = _buyer_payment_rows(s, o.id)
+        rating = s.scalars(select(db.BuyerRating).where(db.BuyerRating.order_id == o.id)).first()
+        return {**v, "group": g.name if g else "", "progress_pct": pg["pct"],
+                "buyer_payment": {"status": payments[-1]["status"], "amount": payments[-1]["amount"],
+                                  "note": payments[-1]["note"]} if payments else {"status": "not_recorded"},
+                "rating": {"stars": rating.stars, "comment": rating.comment} if rating else None}
     q = [{**{k: x[k] for k in x if k != "photo"}, "has_photo": bool(x.get("photo"))} for x in d.get("quality", [])]
     return {**v, "rate_card": {k: (d.get("rate_card") or ratecards.default_card(defaults.DEFAULT_PRODUCT)).get(k) for k in ("product", "version", "source")}, "price": d.get("price"), "plan": d.get("plan"), "payout": d.get("payout"), "approvals": d.get("approvals"),
             "disputes": d.get("disputes", []), "declined": d.get("declined", []), "quality": q, "progress": pg, "risk": d.get("risk"),
@@ -162,6 +171,14 @@ def leader_overview(user, now=None, summary_only=False):
         queue.extend({"order_id": None, "ratecard_id": card.id, "kind": "ratecard", "label": f"Rate-card vote needed: {card.product} v{card.version}", "action": "pricing"} for card in proposed)
         active_orders = [o for o in orders if o.status in active_statuses]
         group_name = group.name if group else ""
+        buyer_money_due = 0.0
+        for order in orders:
+            payments = _buyer_payment_rows(s, order.id)
+            if not payments: continue
+            latest = payments[-1]
+            billed = float(order.data.get("quote") or order.data["order"].get("offered_price") or 0) * int(order.data["order"]["qty"])
+            if latest["status"] == "unpaid": buyer_money_due += float(latest["amount"] or billed)
+            elif latest["status"] == "advance": buyer_money_due += max(0, billed - float(latest["amount"] or 0))
         activity = [{"seq": event.i, "type": event.type, "order_id": event.order_id,
                      "summary": event.type.replace(".", " ").replace("_", " ").capitalize(),
                      "ts": event.ts} for event in events[-8:]]
@@ -170,7 +187,8 @@ def leader_overview(user, now=None, summary_only=False):
                     "pieces_finished_today": sum(pieces_today.values()),
                     "orders_on_track": sum(1 for o in rows if o["status"] in active_statuses and o["health"] == "On track"),
                     "waiting_for_leader": len(queue),
-                    "payout_waiting": sum(o.status == "payout_pending" for o in active_orders)},
+                    "payout_waiting": sum(o.status == "payout_pending" for o in active_orders),
+                    "buyer_money_due": round(buyer_money_due, 2)},
                 "decision_queue": queue[:5], "decision_count": len(queue), "orders": rows,
                 "activity": activity, "updated_at": now, "last_seq": -1 if latest_seq is None else latest_seq}
         if summary_only:
@@ -184,6 +202,20 @@ def leader_order_detail(user, oid):
         v = _view(s, o, user)
         buyer = s.get(db.User, o.buyer_id)
         v["buyer_name"] = buyer.name if buyer else (v.get("order") or {}).get("buyer_name", "Buyer")
+        payments = _buyer_payment_rows(s, o.id)
+        history = list(s.scalars(select(db.Order).where(
+            db.Order.buyer_id == o.buyer_id, db.Order.group_id == user["group_id"],
+            db.Order.id != o.id).order_by(db.Order.id.desc()).limit(5)))
+        v["buyer"] = {"id": buyer.id if buyer else None, "name": buyer.name if buyer else "Buyer",
+                      "past_orders": [{"id": previous.id, "status": previous.status,
+                                       "product": (previous.data.get("order") or {}).get("product", "Order"),
+                                       "qty": (previous.data.get("order") or {}).get("qty")}
+                                      for previous in history]}
+        v["buyer_payment"] = {"status": payments[-1]["status"] if payments else "not_recorded",
+                              "payments": payments}
+        v["notes"] = [{"id": note.id, "note": note.note, "created": note.created}
+                      for note in s.scalars(select(db.OrderNote).where(db.OrderNote.order_id == o.id)
+                                           .order_by(db.OrderNote.created.desc()))]
         latest_report = s.scalars(select(db.LedgerEvent).where(
             db.LedgerEvent.order_id == o.id, db.LedgerEvent.type == "progress.reported"
         ).order_by(db.LedgerEvent.i.desc())).first()
@@ -218,7 +250,8 @@ def leader_team(user, now=None):
             db.Order.group_id == user["group_id"],
             db.Order.status.in_(("planned", "in_production"))
         )).all())
-        member_rows = {m.id: {"id": m.id, "name": m.name, "skills": m.skills or [],
+        member_rows = {m.id: {"id": m.id, "name": m.name, "phone": m.phone, "language": m.lang or "en",
+                              "skills": m.skills or [],
                               "capacity": m.capacity or 0, "last_active_at": m.last_active_at,
                               "tasks": [], "status": "Idle"} for m in members}
         order_ids = [o.id for o in orders]
@@ -260,8 +293,25 @@ def groups():
     with db.S() as s:
         out = []
         for g in s.scalars(select(db.Group)):
-            n = sum(1 for o in s.scalars(select(db.Order).where(db.Order.group_id == g.id)) if o.status == "closed")
-            out.append({"id": g.id, "name": g.name, "village": g.village, "orders_delivered": n})
+            orders = list(s.scalars(select(db.Order).where(db.Order.group_id == g.id)))
+            closed = [o for o in orders if o.status == "closed"]
+            ratings = list(s.scalars(select(db.BuyerRating).where(db.BuyerRating.group_id == g.id)))
+            on_time = sum(1 for o in closed if (o.data or {}).get("due_at") and
+                          max((x.get("ts", 0) for x in ((o.data.get("delivery") or {}).get("shipments") or [])), default=0) <= o.data["due_at"])
+            first_samples = {}
+            for order in closed:
+                for sample in order.data.get("quality", []):
+                    key = (order.id, sample.get("member"), sample.get("stage"))
+                    if key not in first_samples or sample.get("i", 0) < first_samples[key].get("i", 0):
+                        first_samples[key] = sample
+            passed_first = sum(sample.get("status") == "passed" for sample in first_samples.values())
+            sample_count = len(first_samples)
+            out.append({"id": g.id, "name": g.name, "village": g.village, "orders_delivered": len(closed),
+                        "on_time_pct": round(on_time * 100 / len(closed)) if len(closed) >= 3 else None,
+                        "average_rating": round(sum(r.stars for r in ratings) / len(ratings), 1) if len(closed) >= 3 and ratings else None,
+                        "first_pass_quality_pct": round(passed_first * 100 / sample_count) if len(closed) >= 3 and sample_count else None,
+                        "rating_count": len(ratings) if len(closed) >= 3 else None,
+                        "passport_note": "Based on recorded closed orders; fewer than 3 deliveries is too little data." if len(closed) < 3 else ""})
         return out
 
 def preferred_group(user):
@@ -284,7 +334,62 @@ def last_order(user):
     if user["role"] != "buyer": raise Err(403, "Only buyers can repeat an order")
     with db.S() as s:
         order = s.scalars(select(db.Order).where(db.Order.buyer_id == user["id"]).order_by(db.Order.id.desc())).first()
-        return {"order": dict(order.data.get("order") or {}), "group_id": order.group_id} if order else None
+        return {"order": {**dict(order.data.get("order") or {}),
+                          "product_key": order.data.get("product_key")}, "group_id": order.group_id} if order else None
+
+def buyer_home(user):
+    if user["role"] != "buyer": raise Err(403, "Only buyers can view this dashboard")
+    with db.S() as s:
+        profile = s.get(db.User, user["id"])
+        orders = list(s.scalars(select(db.Order).where(db.Order.buyer_id == user["id"])).all())
+        order_ids = [order.id for order in orders]
+        activity_rows = list(s.scalars(select(db.LedgerEvent).where(db.LedgerEvent.order_id.in_(order_ids))
+                                       .order_by(db.LedgerEvent.i.desc()).limit(50))) if order_ids else []
+        by_order = {order.id: order for order in orders}
+        import events as event_projection
+        activity = []
+        for event in activity_rows:
+            item = event_projection.project(event, user, by_order.get(event.order_id))
+            if item: activity.append(item)
+            if len(activity) == 5: break
+        return {"orders": my_orders(user), "groups": groups(),
+                "preferred_group_id": profile.preferred_group_id,
+                "profile": {"name": profile.name, "language": profile.lang or "en",
+                            "consented": bool(profile.consent_at)},
+                "last_order": last_order(user), "activity": activity}
+
+def buyer_products(user):
+    if user["role"] != "buyer": raise Err(403, "Only buyers can view these products")
+    return [{"key": key, "label": product["label"], "unit": product["unit"]}
+            for key, product in defaults.TEMPLATES.items()]
+
+def buyer_submit_order(user, group_id, details):
+    if user["role"] != "buyer": raise Err(403, "Only buyers can place orders")
+    try: group_id = int(group_id)
+    except (TypeError, ValueError): raise Err(422, "Choose a group")
+    try:
+        qty = int(details.get("qty"))
+        days = int(details.get("deadline_days"))
+        offered = float(details.get("offered_price"))
+    except (TypeError, ValueError):
+        raise Err(422, "Enter a quantity, price per piece and delivery days")
+    if qty < 1 or qty > 100000: raise Err(422, "Quantity must be between 1 and 100,000 pieces")
+    if days < 1 or days > 365: raise Err(422, "Delivery time must be between 1 and 365 days")
+    if not math.isfinite(offered) or offered <= 0: raise Err(422, "Price per piece must be positive")
+    product_key = _product_key(details.get("product"))
+    if product_key not in defaults.TEMPLATES: raise Err(422, "Choose a listed product")
+    order = {"product": defaults.TEMPLATES[product_key]["label"], "product_key": product_key,
+             "qty": qty, "offered_price": offered, "deadline_days": days,
+             "colour": str(details.get("colour") or "")[:80],
+             "specifications": str(details.get("specifications") or "")[:1000],
+             "delivery_address": str(details.get("delivery_address") or "")[:300]}
+    response = submit_order(user, group_id, "", {"order": order, "unclear": []})
+    if user.get("id"):
+        with db.S() as s:
+            buyer = s.get(db.User, user["id"])
+            if buyer and buyer.preferred_group_id != int(group_id):
+                buyer.preferred_group_id = int(group_id); s.commit()
+    return response
 
 def handoff(user, group_id, message):
     """Notify only the chosen group's active leaders; never broadcast buyer details across groups."""
@@ -407,14 +512,17 @@ def resolve_dispute(user, oid, idx, note=""):
         ds[idx].update(open=False, note=str(note)[:300]); _set(o, disputes=ds); _log(s, o, "dispute.resolved", user, {"idx": idx}); _settle(s, o, user); s.commit(); return _view(s, o, user)
 def add_member(user, phone, name, skills, capacity):
     from auth import norm
+    _leader_only(user)
     with db.S() as s:
         p = norm(phone)
         if s.scalars(select(db.User).where(db.User.phone == p)).first(): raise Err(409, "Phone already registered")
         s.add(db.User(phone=p, name=str(name)[:80], role="seller", group_id=user["group_id"], skills=list(skills or []), capacity=int(capacity or 0))); s.commit()
         return {"ok": True}
 def members(user):
+    _leader_only(user)
     with db.S() as s:
-        return [{"id": m.id, "name": m.name, "skills": m.skills, "capacity": m.capacity}
+        return [{"id": m.id, "name": m.name, "phone": m.phone, "skills": m.skills,
+                 "capacity": m.capacity, "language": m.lang or "en", "last_active_at": m.last_active_at}
                 for m in s.scalars(select(db.User).where(db.User.group_id == user["group_id"], db.User.role == "seller", db.User.active == True))]  # noqa: E712
 
 # ---- seller (SHG member): sees ONLY her own lines ----
@@ -753,7 +861,354 @@ def escalate_overdue(minutes=None):
 # ---- language, WhatsApp self-registration, owner role switch ----
 def set_lang(user, lang):
     with db.S() as s:
-        u = s.get(db.User, user["id"]); u.lang = lang; s.commit()
+        u = s.get(db.User, user["id"]); u.lang = lang
+        LED.append("user.language_changed", {"lang": lang}, f"{user['role']}:{user['id']}", s=s)
+        s.commit()
+
+def _buyer_payment_rows(s, oid):
+    rows = list(s.scalars(select(db.BuyerPayment).where(db.BuyerPayment.order_id == oid).order_by(db.BuyerPayment.id)))
+    return [{"status": x.status, "amount": x.amount, "paid_at": x.paid_at, "note": x.note} for x in rows]
+
+def leader_buyer_contact(user, buyer_id):
+    _leader_only(user)
+    with db.S() as s:
+        buyer = s.get(db.User, int(buyer_id))
+        order = s.scalars(select(db.Order).where(
+            db.Order.group_id == user["group_id"], db.Order.buyer_id == int(buyer_id)
+        ).limit(1)).first()
+        if not buyer or not order: raise Err(404, "Buyer not found in your group")
+        s.add(db.AccessLog(actor_id=user["id"], action="buyer_contact_viewed",
+                           target_id=buyer.id, created=time.time()))
+        LED.append("buyer.contact_viewed", {"buyer_id": buyer.id}, f"leader:{user['id']}", order.id, s=s)
+        s.commit()
+        return {"name": buyer.name, "phone": buyer.phone}
+
+def leader_buyers(user):
+    _leader_only(user)
+    with db.S() as s:
+        orders = list(s.scalars(select(db.Order).where(db.Order.group_id == user["group_id"]).order_by(db.Order.id.desc())))
+        by_buyer = {}
+        for order in orders:
+            buyer = s.get(db.User, order.buyer_id)
+            if not buyer: continue
+            row = by_buyer.setdefault(buyer.id, {"id": buyer.id, "name": buyer.name,
+                "orders": 0, "closed": 0, "on_time": 0, "on_time_known": 0,
+                "balance_due": 0.0, "ratings": []})
+            row["orders"] += 1
+            row["closed"] += int(order.status == "closed")
+            if order.status == "closed":
+                due_at = order.data.get("due_at")
+                shipments = (order.data.get("delivery") or {}).get("shipments", [])
+                signed_at = [shipment.get("signoff", {}).get("ts") for shipment in shipments
+                             if shipment.get("signoff", {}).get("ts") is not None]
+                if due_at is not None and signed_at:
+                    row["on_time_known"] += 1
+                    row["on_time"] += int(max(signed_at) <= due_at)
+            payments = _buyer_payment_rows(s, order.id)
+            if payments:
+                latest = payments[-1]
+                billed = float(order.data.get("quote") or order.data["order"].get("offered_price") or 0) * int(order.data["order"]["qty"])
+                if latest["status"] == "unpaid": row["balance_due"] += float(latest["amount"] or billed)
+                elif latest["status"] == "advance": row["balance_due"] += max(0, billed - float(latest["amount"] or 0))
+            rating = s.scalars(select(db.BuyerRating).where(db.BuyerRating.order_id == order.id)).first()
+            if rating: row["ratings"].append(rating.stars)
+        return [{"id": row["id"], "name": row["name"], "orders": row["orders"],
+                 "closed": row["closed"], "balance_due": round(row["balance_due"], 2),
+                 "on_time_pct": round(row["on_time"] * 100 / row["on_time_known"]) if row["on_time_known"] else None,
+                 "average_rating": round(sum(row["ratings"]) / len(row["ratings"]), 1) if row["ratings"] else None}
+                for row in by_buyer.values()]
+
+def leader_add_order_note(user, oid, note):
+    _leader_only(user); note = str(note or "").strip()
+    if not note: raise Err(422, "Write a note before saving")
+    if len(note) > 500: raise Err(422, "Notes must be 500 characters or fewer")
+    with db.S() as s:
+        order = _order(s, oid, user)
+        row = db.OrderNote(order_id=oid, leader_id=user["id"], note=note, created=time.time())
+        s.add(row); s.flush()
+        LED.append("order.note_added", {"note_id": row.id}, f"leader:{user['id']}", oid, s=s)
+        s.commit()
+        return {"id": row.id, "note": row.note, "created": row.created}
+
+def leader_get_order_notes(user, oid):
+    _leader_only(user)
+    with db.S() as s:
+        _order(s, oid, user)
+        return [{"id": row.id, "note": row.note, "created": row.created}
+                for row in s.scalars(select(db.OrderNote).where(db.OrderNote.order_id == oid)
+                                     .order_by(db.OrderNote.created.desc()))]
+
+def leader_record_buyer_payment(user, oid, status, amount, note=""):
+    _leader_only(user)
+    if status not in ("unpaid", "advance", "paid"): raise Err(422, "Status must be unpaid, advance or paid")
+    try: amount = float(amount)
+    except (TypeError, ValueError): raise Err(422, "Enter a valid payment amount")
+    if not math.isfinite(amount) or amount < 0: raise Err(422, "Payment amount cannot be negative")
+    note = str(note or "").strip()[:250]
+    with db.S() as s:
+        order = _order(s, oid, user)
+        if order.status not in POST_PAY: raise Err(409, "Record buyer payment after the group has proposed a payout")
+        row = db.BuyerPayment(order_id=oid, status=status, amount=amount,
+                              paid_at=time.time() if status in ("advance", "paid") else None,
+                              note=note, actor_id=user["id"])
+        s.add(row); s.flush()
+        LED.append("buyer.payment_recorded", {"payment_id": row.id, "status": status, "amount": amount},
+                   f"leader:{user['id']}", oid, s=s)
+        s.commit()
+        buyer = s.get(db.User, order.buyer_id)
+        if buyer:
+            notify.send(buyer.phone, _payment_message(status, amount, oid, buyer.lang or "en"))
+        return {"status": status, "amount": amount, "paid_at": row.paid_at, "note": note}
+
+def _payment_message(status, amount, oid, lang):
+    if lang == "hi":
+        labels = {"unpaid": f"ऑर्डर #{oid}: भुगतान बाकी दर्ज किया गया (₹{amount:g})।", "advance": f"ऑर्डर #{oid}: ₹{amount:g} अग्रिम भुगतान दर्ज हुआ।", "paid": f"ऑर्डर #{oid}: ₹{amount:g} भुगतान दर्ज हुआ।"}
+    elif lang == "hing":
+        labels = {"unpaid": f"Order #{oid}: ₹{amount:g} payment baaki record hua.", "advance": f"Order #{oid}: ₹{amount:g} advance payment record hua.", "paid": f"Order #{oid}: ₹{amount:g} payment record hua."}
+    else:
+        labels = {"unpaid": f"Order #{oid}: unpaid balance of Rs {amount:g} recorded.", "advance": f"Order #{oid}: Rs {amount:g} advance recorded.", "paid": f"Order #{oid}: Rs {amount:g} payment recorded."}
+    return labels[status]
+
+def leader_alerts(user):
+    _leader_only(user)
+    overview = leader_overview(user)
+    alerts = [{"kind": item["kind"], "order_id": item.get("order_id"), "label": item["label"],
+               "action": item["action"], "age_minutes": None}
+              for item in overview["decision_queue"]]
+    with db.S() as s:
+        issues = list(s.scalars(select(db.LedgerEvent).where(
+            db.LedgerEvent.type == "member.issue").order_by(db.LedgerEvent.i.desc()).limit(100)))
+        for event in issues:
+            order = s.get(db.Order, event.order_id) if event.order_id else None
+            if order and order.group_id == user["group_id"]:
+                alerts.append({"kind": "member_issue", "order_id": order.id, "label": "Member reported an issue",
+                               "action": "orders", "age_minutes": max(0, int((time.time() - (event.ts or time.time())) / 60))})
+        leaves = list(s.scalars(select(db.LeaveRequest).where(
+            db.LeaveRequest.group_id == user["group_id"], db.LeaveRequest.status == "pending")))
+        alerts.extend({"kind": "leave", "order_id": None, "label": "Member leave request needs review",
+                       "action": "team", "age_minutes": max(0, int((time.time() - item.created) / 60))}
+                      for item in leaves)
+    return alerts
+
+def leader_broadcast(user, message, member_id=None):
+    _leader_only(user); message = str(message or "").strip()
+    if not message or len(message) > 500: raise Err(422, "Message must be 1 to 500 characters")
+    if member_id is not None:
+        try:
+            member_id = int(member_id)
+            if member_id < 1: raise ValueError()
+        except (TypeError, ValueError): raise Err(422, "Choose a valid member")
+    with db.S() as s:
+        query = select(db.User).where(db.User.group_id == user["group_id"], db.User.role == "seller", db.User.active == True)  # noqa: E712
+        if member_id is not None: query = query.where(db.User.id == int(member_id))
+        recipients = list(s.scalars(query))
+        if member_id is not None and not recipients: raise Err(404, "Active member not found in your group")
+        now = time.time()
+        for member in recipients:
+            notice = db.Notice(group_id=user["group_id"], user_id=member.id, sender_id=user["id"],
+                               message=message, created=now)
+            s.add(notice); s.flush()
+            LED.append("notice.created", {"notice_id": notice.id, "user_id": member.id},
+                       f"leader:{user['id']}", s=s)
+            notify.send(member.phone, _leader_notice_message(message, member.lang or "en"))
+        s.commit()
+        return {"sent": len(recipients)}
+
+def leader_notices(user):
+    _leader_only(user)
+    with db.S() as s:
+        rows = list(s.scalars(select(db.Notice).where(db.Notice.group_id == user["group_id"])
+                              .order_by(db.Notice.created.desc()).limit(100)))
+        return [{"id": row.id, "member_id": row.user_id,
+                 "member": (s.get(db.User, row.user_id).name if s.get(db.User, row.user_id) else "Member"),
+                 "message": row.message, "created": row.created, "seen": row.seen_at is not None}
+                for row in rows]
+
+def _leader_notice_message(message, lang):
+    intro = {"hi": "आपकी समूह लीडर का संदेश: ", "hing": "Aapki group leader ka message: "}.get(lang, "Message from your group leader: ")
+    return intro + message
+
+def member_notices(user):
+    if user["role"] != "seller": raise Err(403, "Only members can view these notices")
+    with db.S() as s:
+        notices = list(s.scalars(select(db.Notice).where(
+            db.Notice.group_id == user["group_id"], db.Notice.user_id == user["id"]
+        ).order_by(db.Notice.created.desc()).limit(100)))
+        leave = list(s.scalars(select(db.LeaveRequest).where(
+            db.LeaveRequest.user_id == user["id"]).order_by(db.LeaveRequest.created.desc()).limit(20)))
+        orders = list(s.scalars(select(db.Order).where(db.Order.group_id == user["group_id"])))
+        order_ids = [order.id for order in orders]
+        rows = list(s.scalars(select(db.LedgerEvent).where(db.LedgerEvent.order_id.in_(order_ids))
+                              .order_by(db.LedgerEvent.i.desc()).limit(100))) if order_ids else []
+        by_order = {order.id: order for order in orders}
+        import events as event_projection
+        system = []
+        for event in rows:
+            item = event_projection.project(event, user, by_order.get(event.order_id))
+            if item:
+                system.append(item)
+            if len(system) >= 20: break
+        return {"messages": [{"id": n.id, "message": n.message, "created": n.created,
+                              "seen": n.seen_at is not None} for n in notices],
+                "system": system,
+                "leave_requests": [{"id": x.id, "days": x.days, "reason": x.reason,
+                                    "status": x.status, "resolution": x.resolution,
+                                    "created": x.created} for x in leave]}
+
+def member_ack_notice(user, notice_id):
+    if user["role"] != "seller": raise Err(403, "Only members can acknowledge notices")
+    with db.S() as s:
+        row = s.get(db.Notice, int(notice_id))
+        if not row or row.group_id != user["group_id"] or row.user_id != user["id"]:
+            raise Err(404, "Notice not found")
+        if row.seen_at is None:
+            row.seen_at = time.time()
+            LED.append("notice.seen", {"notice_id": row.id, "user_id": user["id"]},
+                       f"seller:{user['id']}", s=s)
+            s.commit()
+        return {"ok": True, "seen": True}
+
+def member_request_leave(user, days, reason=""):
+    if user["role"] != "seller": raise Err(403, "Only members can request leave")
+    from datetime import date
+    if not isinstance(days, list) or not 1 <= len(days) <= 7: raise Err(422, "Choose one to seven days")
+    try:
+        parsed = sorted({date.fromisoformat(str(item)) for item in days})
+    except (TypeError, ValueError): raise Err(422, "Choose valid calendar dates")
+    if any((item - date.today()).days < 0 or (item - date.today()).days > 14 for item in parsed):
+        raise Err(422, "Choose dates from today through the next 14 days")
+    with db.S() as s:
+        row = db.LeaveRequest(group_id=user["group_id"], user_id=user["id"], days=[x.isoformat() for x in parsed],
+                              reason=str(reason or "").strip()[:250], status="pending",
+                              created=time.time(), updated=time.time())
+        s.add(row); s.flush()
+        LED.append("leave.requested", {"leave_id": row.id, "user_id": user["id"]},
+                   f"seller:{user['id']}", s=s)
+        s.commit()
+        _tell(s, user["group_id"], "leader",
+              f"{user['name']} requested leave for {', '.join(row.days)}. Review in the dashboard or reply LEAVES.")
+        return {"id": row.id, "status": row.status, "days": row.days}
+
+def leader_leave_requests(user):
+    _leader_only(user)
+    with db.S() as s:
+        rows = list(s.scalars(select(db.LeaveRequest).where(db.LeaveRequest.group_id == user["group_id"])
+                              .order_by(db.LeaveRequest.created.desc()).limit(100)))
+        return [{"id": row.id, "member_id": row.user_id,
+                 "member": (s.get(db.User, row.user_id).name if s.get(db.User, row.user_id) else "Member"),
+                 "days": row.days, "reason": row.reason, "status": row.status,
+                 "resolution": row.resolution, "created": row.created} for row in rows]
+
+def leader_resolve_leave(user, request_id, status, note=""):
+    _leader_only(user)
+    if status not in ("noted", "approved", "declined"): raise Err(422, "Choose noted, approved or declined")
+    with db.S() as s:
+        row = s.get(db.LeaveRequest, int(request_id))
+        if not row or row.group_id != user["group_id"]: raise Err(404, "Leave request not found")
+        if row.status != "pending": raise Err(409, "This leave request was already reviewed")
+        row.status, row.resolution, row.updated = status, str(note or "").strip()[:250], time.time()
+        LED.append("leave.resolved", {"leave_id": row.id, "user_id": row.user_id, "status": status},
+                   f"leader:{user['id']}", s=s)
+        s.commit()
+        member = s.get(db.User, row.user_id)
+        if member:
+            notify.send(member.phone, _leave_resolution_message(status, row.days, member.lang or "en", row.resolution))
+        return {"id": row.id, "status": row.status, "resolution": row.resolution}
+
+def _leave_resolution_message(status, days, lang, note):
+    dates = ", ".join(days)
+    if lang == "hi":
+        text = {"noted": f"आपकी छुट्टी की सूचना दर्ज हुई: {dates}.", "approved": f"आपकी छुट्टी मंज़ूर हुई: {dates}.", "declined": f"आपकी छुट्टी मंज़ूर नहीं हुई: {dates}."}[status]
+        return text + (f" लीडर का संदेश: {note}" if note else "")
+    if lang == "hing":
+        text = {"noted": f"Leave note kar li: {dates}.", "approved": f"Leave approve hui: {dates}.", "declined": f"Leave approve nahi hui: {dates}."}[status]
+        return text + (f" Leader ka note: {note}" if note else "")
+    text = {"noted": f"Your leave was noted: {dates}.", "approved": f"Your leave was approved: {dates}.", "declined": f"Your leave was declined: {dates}."}[status]
+    return text + (f" Leader's note: {note}" if note else "")
+
+def issue_magic_link(phone):
+    from auth import norm
+    ttl = max(1, int(os.getenv("MAGIC_LINK_TTL_MIN", "10"))) * 60
+    base = os.getenv("PUBLIC_URL", "").rstrip("/")
+    if not base:
+        if os.getenv("ENV", "prod") == "dev": base = "http://localhost:8000"
+        else: raise Err(503, "Secure sign-in links are not configured")
+    if os.getenv("ENV", "prod") != "dev" and not base.startswith("https://"):
+        raise Err(503, "Secure sign-in links require an HTTPS public URL")
+    with db.S() as s:
+        user = s.scalars(select(db.User).where(db.User.phone == norm(phone), db.User.active == True)).first()  # noqa: E712
+        if not user: return {"ok": True}
+        recent = s.scalars(select(db.MagicLink).where(db.MagicLink.phone == user.phone)
+                           .order_by(db.MagicLink.created.desc())).first()
+        if recent and time.time() - recent.created < 60: raise Err(429, "Please wait before requesting another sign-in link")
+        token = os.urandom(32).hex()
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        row = db.MagicLink(phone=user.phone, token_hash=token_hash, expires=time.time() + ttl, created=time.time())
+        s.add(row); s.flush()
+        LED.append("login.magic_link_issued", {"user_id": user.id}, f"{user.role}:{user.id}", s=s)
+        s.commit()
+        landing = {"leader": "overview", "seller": "home", "buyer": "home", "officer": "overview"}.get(user.role, "home")
+        return {"ok": True, "url": f"{base}/app/go?t={token}#{landing}", "expires_in": ttl}
+
+def consume_magic_link(token):
+    from sqlalchemy import update
+    token = str(token or "")
+    if len(token) != 64: raise Err(401, "Invalid or expired sign-in link")
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with db.S() as s:
+        row = s.scalars(select(db.MagicLink).where(db.MagicLink.token_hash == token_hash)).first()
+        if not row or row.used_at is not None or row.expires <= time.time():
+            raise Err(401, "Invalid or expired sign-in link")
+        user = s.scalars(select(db.User).where(db.User.phone == row.phone, db.User.active == True)).first()  # noqa: E712
+        if not user: raise Err(401, "Invalid or expired sign-in link")
+        now = time.time()
+        consumed = s.execute(update(db.MagicLink).where(
+            db.MagicLink.id == row.id, db.MagicLink.used_at.is_(None),
+            db.MagicLink.expires > now).values(used_at=now))
+        if consumed.rowcount != 1: raise Err(401, "Invalid or expired sign-in link")
+        LED.append("login.magic_link_used", {"user_id": user.id}, f"{user.role}:{user.id}", s=s)
+        s.commit()
+        return {"id": user.id, "name": user.name, "role": user.role}
+
+def leader_price_calculate(user, product, qty, offered):
+    _leader_only(user)
+    try:
+        qty, offered = int(qty), float(offered)
+        if qty < 1 or not math.isfinite(offered) or offered <= 0: raise ValueError()
+    except (TypeError, ValueError): raise Err(422, "Enter a positive quantity and offer price")
+    product_key = _product_key(product)
+    if not product_key: raise Err(422, "Choose a product from the current rate cards")
+    with db.S() as s:
+        card = ratecards.active(s, user["group_id"], product_key)
+        price = E.price_check(qty, **card["cost"], offered=offered)
+        return {"product": card["product"], "version": card["version"], "price": price}
+
+def member_raise_concern(user, message):
+    if user["role"] != "seller": raise Err(403, "Only members can raise a concern")
+    message = str(message or "").strip()
+    if not message or len(message) > 500: raise Err(422, "Write a concern of 1 to 500 characters")
+    with db.S() as s:
+        officers = list(s.scalars(select(db.User).where(db.User.role == "officer", db.User.active == True)))  # noqa: E712
+        concern = db.MemberConcern(group_id=user["group_id"], user_id=user["id"],
+                                   message=message, created=time.time())
+        s.add(concern); s.flush()
+        LED.append("concern.raised", {"concern_id": concern.id, "group_id": user["group_id"]},
+                   f"seller:{user['id']}", s=s)
+        s.commit()
+        for officer in officers:
+            notify.send(officer.phone, f"Private member concern from {user['name']} in group {user['group_id']}: {message}. This is not shared with the group leader.")
+        return {"ok": True}
+
+def officer_member_concerns(user):
+    if user["role"] != "officer": raise Err(403, "Only mission officers can view member concerns")
+    with db.S() as s:
+        rows = s.execute(select(db.MemberConcern, db.User, db.Group)
+                         .join(db.User, db.User.id == db.MemberConcern.user_id)
+                         .join(db.Group, db.Group.id == db.MemberConcern.group_id)
+                         .order_by(db.MemberConcern.created.desc()).limit(100)).all()
+        return [{"id": concern.id, "member": member.name, "group": group.name,
+                 "message": concern.message, "created": concern.created}
+                for concern, member, group in rows]
 def open_registration(): return os.getenv("OPEN_REGISTRATION", "0") == "1"
 def register_self(phone, name, role, skill=None, lang="en"):
     """A new number registers itself over WhatsApp (language -> name -> role -> skill). Only when OPEN_REGISTRATION=1; otherwise the leader adds members."""
@@ -948,7 +1403,7 @@ def delivery_photo_get(user, oid, i):
         if not 0 <= i < len(sh) or not sh[i].get("photo"): raise Err(404, "No photo")
         return sh[i]["photo"]
 
-def signoff(user, oid, received, note="", final=False):
+def signoff(user, oid, received, note="", final=False, rating=None, rating_note=""):
     """Buyer sign-off: how many pieces actually arrived. Short = partially_delivered (the rest can be sent), or the buyer can accept the shortfall and close."""
     if user["role"] not in ("buyer", "leader"): raise Err(403, "Only the buyer can sign off a delivery")
     with db.S() as s:
@@ -962,8 +1417,32 @@ def signoff(user, oid, received, note="", final=False):
         done = tot >= qty or bool(final)
         _set(o, "closed" if done else "partially_delivered")
         _log(s, o, "delivery.signed_off", user, {"i": cur["i"], "received": n, "sent": cur["qty"], "delivered": tot, "of": qty, "accepted_short": bool(final and tot < qty)}); s.commit()
+        if done and rating is not None:
+            rate_buyer_group(user, oid, rating, rating_note)
         _tell(s, o.group_id, "leader", f"Order #{o.id}: buyer received {n} of {cur['qty']} pieces ({tot}/{qty} in total). " + ("Order closed." if done else f"{qty - tot} still owed: pack them and send READY {o.id} <pieces>."))
         return _view(s, o, user)
+
+def rate_buyer_group(user, oid, stars, comment=""):
+    if user["role"] != "buyer": raise Err(403, "Only the buyer can rate this group")
+    try: stars = int(stars)
+    except (TypeError, ValueError): raise Err(422, "Choose a rating from 1 to 5")
+    if stars < 1 or stars > 5: raise Err(422, "Choose a rating from 1 to 5")
+    with db.S() as s:
+        order = _order(s, oid, user)
+        if order.status != "closed": raise Err(409, "Rate the group after the order is closed")
+        row = s.scalars(select(db.BuyerRating).where(db.BuyerRating.order_id == oid)).first()
+        if row and row.buyer_id != user["id"]: raise Err(404, "Order not found")
+        now = time.time()
+        if row:
+            row.stars, row.comment, row.created = stars, str(comment or "").strip()[:300], now
+        else:
+            row = db.BuyerRating(order_id=oid, buyer_id=user["id"], group_id=order.group_id,
+                                 stars=stars, comment=str(comment or "").strip()[:300], created=now)
+            s.add(row)
+        s.flush()
+        _log(s, order, "buyer.rating_submitted", user, {"stars": stars})
+        s.commit()
+        return {"ok": True, "stars": stars}
 
 def block(user, oid, reason):
     """Delivery cannot go ahead (road closed, buyer unreachable, goods held up). Remembers the state to come back to."""

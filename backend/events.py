@@ -22,6 +22,14 @@ _LABELS = {
     "order.blocked": "Order blocked",
     "order.unblocked": "Order unblocked",
     "order.cancelled": "Order cancelled",
+    "buyer.payment_recorded": "Buyer payment recorded",
+    "buyer.rating_submitted": "Buyer rated the group",
+    "order.note_added": "Private order note added",
+    "notice.created": "Leader sent a message",
+    "notice.seen": "Member saw a message",
+    "leave.requested": "Member requested leave",
+    "leave.resolved": "Leave request reviewed",
+    "member.issue": "Member reported an issue",
 }
 
 def _value(event, key):
@@ -37,6 +45,10 @@ def _order_for(event, order):
         return s.get(db.Order, order_id)
 
 def _refresh(type_):
+    if type_.startswith(("notice.", "leave.")):
+        return ["notices", "team", "activity"]
+    if type_.startswith(("buyer.", "order.note_")):
+        return ["orders", "buyers", "alerts", "activity"]
     if type_.startswith(("progress.", "quality.", "plan.", "production.", "task.", "member.")):
         return ["orders", "team", "activity"]
     if type_.startswith(("payout.", "dispute.")):
@@ -51,6 +63,15 @@ def project(event, user, order=None, actor_group=None):
     ts = _value(event, "ts") or 0
     role, uid, group_id = user.get("role"), user.get("id"), user.get("group_id")
     projected_type, refresh = type_, _refresh(type_)
+    payload = _value(event, "payload") or {}
+    actor = _value(event, "actor") or ""
+    if actor_group is None and oid is None and actor.startswith(("leader:", "seller:")):
+        try:
+            with db.S() as s:
+                person = s.get(db.User, int(actor.split(":", 1)[1]))
+                actor_group = person.group_id if person else None
+        except ValueError:
+            pass
     if role == "officer":
         return {"seq": seq, "type": "metrics_changed", "order_id": None, "ts": ts,
                 "summary": "Programme metrics updated", "refresh": ["metrics"]}
@@ -58,6 +79,8 @@ def project(event, user, order=None, actor_group=None):
     if oid is not None and not o:
         return None
     if role == "leader":
+        if type_ == "concern.raised":
+            return None
         if o and o.group_id != group_id:
             return None
         if not o and actor_group != group_id:
@@ -65,6 +88,9 @@ def project(event, user, order=None, actor_group=None):
         summary = _LABELS.get(type_, "Group activity")
         if oid is not None:
             summary += f" · Order #{oid}"
+        if type_ == "leave.requested": summary = "A member requested leave"
+        elif type_ == "notice.seen": summary = "A member saw your message"
+        elif type_ == "leave.resolved": summary = "A leave request was reviewed"
     elif role == "buyer":
         if not o or o.buyer_id != uid:
             return None
@@ -80,20 +106,40 @@ def project(event, user, order=None, actor_group=None):
             done = sum(min(int(progress.get(f"{a['member']}:{a['stage']}", 0)), int(a.get("units") or 0)) for a in assignments)
             pct = int(done * 100 / total) if total else 0
             summary = f"Your order is about {pct}% complete"
+        elif type_ == "buyer.payment_recorded":
+            summary = "Your group updated the payment status"
+        elif type_ == "buyer.rating_submitted":
+            summary = "Your group received your order rating"
         else:
             projected_type = "buyer.order_updated"
             summary = "Your order was updated"
     elif role == "seller":
         if not o:
-            if not type_.startswith("ratecard.") or actor_group != group_id:
-                return None
+            if type_ == "notice.created":
+                relevant = int(payload.get("user_id", -1)) == uid and actor_group == group_id
+                summary = "A message from your group leader"
+            elif type_ == "notice.seen":
+                relevant = int(payload.get("user_id", -1)) == uid and actor.endswith(f":{uid}")
+                summary = "Your message was marked as seen"
+            elif type_ == "leave.requested":
+                relevant = actor.endswith(f":{uid}") and actor_group == group_id
+                summary = "Your leave request was sent"
+            elif type_ == "leave.resolved":
+                relevant = int(payload.get("user_id", -1)) == uid and actor_group == group_id
+                summary = "Your leave request was reviewed"
+            elif type_.startswith("ratecard."):
+                relevant = actor_group == group_id
+                summary = _LABELS.get(type_, "Group rate card updated")
+            elif type_ == "concern.raised":
+                relevant, summary = actor.endswith(f":{uid}"), "Your private concern was sent"
+            else:
+                relevant, summary = False, ""
+            if not relevant: return None
         else:
             data = o.data or {}
             in_plan = any(int(a.get("member", -1)) == uid for a in ((data.get("plan") or {}).get("assignments") or []))
             in_payout = any(int(line.get("member", -1)) == uid for line in ((data.get("payout") or {}).get("lines") or []))
-            payload = _value(event, "payload") or {}
             named_member = payload.get("member") == uid
-            actor = _value(event, "actor") or ""
             own_actor = actor.endswith(f":{uid}") and actor.startswith("seller:")
             if type_.startswith("progress."):
                 relevant = own_actor
@@ -115,11 +161,13 @@ def project(event, user, order=None, actor_group=None):
                 relevant = own_actor or named_member
             if not relevant:
                 return None
-        summary = "An update needs your attention" if type_ in ("plan.proposed", "quality.decided", "payout.proposed") else "Your work was updated"
+        if o:
+            summary = "An update needs your attention" if type_ in ("plan.proposed", "quality.decided", "payout.proposed") else "Your work was updated"
     else:
         return None
     if role == "buyer": refresh = ["orders"]
-    elif role == "seller": refresh = ["tasks", "earnings"]
+    elif role == "seller" and type_.startswith(("notice.", "leave.")): refresh = ["notices", "team"]
+    elif role == "seller": refresh = ["tasks", "earnings", "notices"]
     return {"seq": seq, "type": projected_type, "order_id": oid, "ts": ts,
             "summary": summary, "refresh": refresh}
 

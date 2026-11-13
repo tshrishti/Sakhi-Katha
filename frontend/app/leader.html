@@ -1,5 +1,5 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Leader - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=desktop"></head><body><main id="m"></main><div id="toast"></div>
-<script src="common.js"></script><script src="js/tabs.js"></script><script src="js/live.js"></script><script>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Leader - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=phase3b"></head><body><main id="m"></main><div id="toast" role="status"></div>
+<script src="common.js?v=phase3"></script><script src="js/tabs.js?v=phase3"></script><script src="js/live.js?v=phase3"></script><script>
 const RES={possible_defect:'Possible defect',met:'Looks OK',cannot_tell:'Cannot tell from photo'};
 const ai=(q,oid,i)=>{const s=q.screening;if(!s)return '';
  const head='<div class="ai"><b>AI pre-check</b> <span class="muted">(suggestion only. You decide.)</span>';
@@ -31,7 +31,7 @@ const card=o=>{const p=o.price,pl=o.plan,po=o.payout;let a='';
  ${o.unclear.length?`<p class="warn">Check with buyer: ${o.unclear.map(esc).join('; ')}</p>`:''}
  ${p?`<p class="${p.loss_making?'bad':''}">Floor Rs ${esc(p.per_unit.floor)}/pc. At the offer, women earn Rs ${esc(p.effective_hourly_at_offer)}/hr vs target Rs ${esc(p.target_hourly)}/hr (${esc(p.pay_gap_pct)}% less). Quote: Rs ${esc(o.quote)}</p>`:''}
  ${pl&&o.status==='planned'?`<table>${pl.assignments.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.stage)} x${x.units}</td><td>Rs ${esc(x.expected_pay)}</td><td>${(o.task_accepted||[]).includes(x.member)?'<span class="ok">accepted</span>':'<span class="muted">not yet accepted</span>'}</td><td class="muted">${esc(x.why)}</td></tr>`).join('')}</table>${pl.issues.length?`<p class="warn">Risk: ${pl.issues.map(esc).join('; ')}</p>`:''}${(pl.options||[]).length?`<div class="warn"><b>Not feasible as ordered. Options:</b><ul>${pl.options.map(x=>`<li>${esc(x.label)}</li>`).join('')}</ul><span class="muted">Agree one with the buyer, then re-quote or replan.</span></div>`:''}`:''}${a}${['accepted','planned','in_production'].includes(o.status)?checklist(o):''}</div>`};
-let overviewData=null, teamData=[], rateCardsData=null, liveClient=null, tabsReady=false, orderView='list';
+let overviewData=null, teamData=[], rateCardsData=null, buyersData=null, alertsData=null, leavesData=null, noticesData=null, extraLoading={}, liveClient=null, tabsReady=false, orderView='list';
 const healthRule='Late: due date passed. Blocked: delivery is blocked. At risk: deadline check projects a shortfall. Waiting: leader action is needed. Stale: no report for 24 hours. On track: none of these.';
 function ensureShell(){
  if($('#leader-dashboard'))return;
@@ -45,7 +45,9 @@ function ensureShell(){
    <button role="tab" data-tab="quality" aria-controls="tab-panel">Quality <span id="quality-badge" class="tab-badge" hidden></span></button>
    <button role="tab" data-tab="delivery" aria-controls="tab-panel">Delivery <span id="delivery-badge" class="tab-badge" hidden></span></button>
    <button role="tab" data-tab="payouts" aria-controls="tab-panel">Payouts <span id="payouts-badge" class="tab-badge" hidden></span></button>
+   <button role="tab" data-tab="buyers" aria-controls="tab-panel">Buyers <span id="buyers-badge" class="tab-badge" hidden></span></button>
    <button role="tab" data-tab="pricing" aria-controls="tab-panel">Pricing <span id="pricing-badge" class="tab-badge" hidden></span></button>
+   <button role="tab" data-tab="alerts" aria-controls="tab-panel">Alerts <span id="alerts-badge" class="tab-badge" hidden></span></button>
   </nav><section id="tab-panel" role="tabpanel" tabindex="0"></section></section>`;
  if(!tabsReady){SakhiTabs.install($('#leader-dashboard'),view=>{
   if(view.tab==='pricing'&&!rateCardsData)api('/leader/ratecards').then(d=>{rateCardsData=d;renderTab(SakhiTabs.current());}).catch(e=>toast(e.message,1));
@@ -76,6 +78,7 @@ function renderOverview(d){
   <div class="kpi"><strong id="kpi-track"></strong><span>Orders on track</span></div>
   <div class="kpi"><strong id="kpi-waiting"></strong><span>Waiting for your decision</span></div>
   <div class="kpi"><strong id="kpi-payout"></strong><span>Payouts awaiting approval</span></div>
+  <div class="kpi"><strong id="kpi-buyer-due"></strong><span>Buyer money due (recorded)</span></div>
  </div><section class="card"><h2>Needs your decision <span id="queue-count" class="tab-badge"></span></h2>
   <div id="decision-list" class="decision-list"></div><button id="see-all" class="secondary" onclick="location.hash='#orders'">See all orders</button>
  </section><section class="card"><h2>Live orders</h2><div id="overview-orders" class="order-list"></div></section>
@@ -83,6 +86,7 @@ function renderOverview(d){
  $('#kpi-active').textContent=k.active_orders;$('#kpi-pieces').textContent=k.pieces_finished_today;
  $('#kpi-track').textContent=k.orders_on_track;$('#kpi-waiting').textContent=k.waiting_for_leader;
  $('#kpi-payout').textContent=k.payout_waiting;
+ $('#kpi-buyer-due').textContent=money(k.buyer_money_due);
  $('#queue-count').textContent=d.decision_count;$('#see-all').hidden=d.decision_count<=5;
  const list=$('#decision-list');
  list.innerHTML=d.decision_queue.length?d.decision_queue.map(x=>`<div class="decision-row"><span>${esc(x.label)}${x.order_id?` · #${x.order_id}`:''}</span>${x.order_id?`<button class="secondary" onclick="openOrder(${x.order_id})">Review</button>`:`<button class="secondary" onclick="location.hash='#orders'">Review</button>`}</div>`).join(''):'<p class="muted">Nothing waiting for you.</p>';
@@ -136,21 +140,48 @@ function renderTab(view){
  setLeaderBadge('quality-badge',qualityWaiting);
  setLeaderBadge('delivery-badge',orders.filter(o=>['settled','ready_for_delivery','dispatched','partially_delivered','blocked'].includes(o.status)).length);
  setLeaderBadge('payouts-badge',orders.filter(o=>o.status==='payout_pending').length);
+ setLeaderBadge('buyers-badge',buyersData?buyersData.filter(buyer=>buyer.balance_due>0).length:0);
  setLeaderBadge('pricing-badge',rateCardsData?.history.filter(card=>card.status==='proposed').length||0);
+ setLeaderBadge('alerts-badge',alertsData?.length||0);
  if(tab==='overview')renderOverview(overviewData);
  else if(tab==='orders')renderOrders(overviewData);
- else if(tab==='team')renderTeam();
+ else if(tab==='team'){renderTeam();if(leavesData===null||noticesData===null)loadLeaderExtra('team');}
  else if(tab==='quality')renderQuality();
  else if(tab==='delivery')renderDelivery();
  else if(tab==='payouts')renderPayouts();
+ else if(tab==='buyers'){
+  if(buyersData)renderBuyers();
+  else loadLeaderExtra('buyers');
+ }
  else if(tab==='pricing')renderPricing();
+ else if(tab==='alerts'){
+  if(alertsData)renderAlerts();
+  else loadLeaderExtra('alerts');
+ }
 }
 function setLeaderBadge(id,count){const badge=$('#'+id);badge.textContent=count||'';badge.hidden=!count;}
+function loadLeaderExtra(key){
+ if(extraLoading[key])return;
+ extraLoading[key]=true;
+ const requests=key==='team'?Promise.all([api('/leader/notices'),api('/leader/leaves')])
+  :api(key==='buyers'?'/leader/buyers':'/leader/alerts');
+ Promise.resolve(requests).then(data=>{
+  if(key==='team'){noticesData=data[0];leavesData=data[1];}
+  else if(key==='buyers')buyersData=data;
+  else alertsData=data;
+  if(SakhiTabs.current().tab===(key==='team'?'team':key))renderTab(SakhiTabs.current());
+ }).catch(error=>toast(error.message,1)).finally(()=>{extraLoading[key]=false;});
+}
 function renderTeam(){
  const rows=teamData||[];
  $('#tab-panel').innerHTML=`<section class="card"><div class="dashboard-heading"><div><h2>Team workload</h2><p class="muted">Work status is based on member reports and declared capacity. It is not location tracking.</p></div></div>
- <div class="order-list">${rows.map(m=>`<article class="order-tile"><div><b>${esc(m.name)}</b> <span class="chip">${esc(m.status)}</span><p>${esc((m.skills||[]).join(', ')||'No skills listed')} · ${m.capacity} pieces/day · Last active ${m.last_active_at?since(m.last_active_at):'not seen on dashboard yet'}</p>
+ <div class="order-list">${rows.map(m=>`<article class="order-tile"><div><b>${esc(m.name)}</b> <span class="chip">${esc(m.status)}</span><p>${esc((m.skills||[]).join(', ')||'No skills listed')} · ${m.capacity} pieces/day · ${esc(m.language||'en')} · Last active ${m.last_active_at?since(m.last_active_at):'not seen on dashboard yet'}</p>
+ <div class="row"><a class="btn secondary" href="tel:${encodeURIComponent(m.phone)}">☎ Call</a><a class="btn secondary" href="https://wa.me/${encodeURIComponent(m.phone.replace('+',''))}" target="_blank" rel="noopener">WhatsApp</a></div>
  ${m.tasks.length?m.tasks.map(t=>`<p>Order #${t.order_id} · ${esc(t.stage)} ${t.done}/${t.units} · Last report ${since(t.last_reported_at)} · ${esc(t.work_status)}</p>`).join(''):'<p class="muted">No active assigned work.</p>'}</div></article>`).join('')||'<p class="muted">No active members.</p>'}</div>
+ <h3>Send a message to members</h3><label class="field">Recipient<select id="notice-recipient"><option value="">All active members</option>${rows.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select></label>
+ <label class="field">Message<textarea id="notice-message" maxlength="500"></textarea></label><button onclick="sendLeaderNotice()">Send WhatsApp message</button>
+ <h3>Leave requests</h3>${leavesData?.length?leavesData.map(item=>`<article class="decision-row"><span><b>${esc(item.member)}</b> · ${esc(item.days.join(', '))} · ${esc(item.status)}${item.reason?`<br>${esc(item.reason)}`:''}${item.resolution?`<br>Resolution: ${esc(item.resolution)}`:''}</span>${item.status==='pending'?`<span><button onclick="resolveLeave(${item.id},'approved')">Approve</button> <button class="secondary" onclick="resolveLeave(${item.id},'noted')">Noted</button> <button class="red" onclick="resolveLeave(${item.id},'declined')">Decline</button></span>`:''}</article>`).join(''):'<p class="muted">No leave requests.</p>'}
+ <section class="card"><h3>Recent leader messages</h3>${noticesData?.length?noticesData.slice(0,12).map(item=>`<p class="notice-row">${esc(item.member)} · ${esc(item.message)} · ${item.seen?'Seen':'Not seen'} <span class="muted">${since(item.created)}</span></p>`).join(''):'<p class="muted">No messages sent yet.</p>'}</section>
  <h3>Add a member</h3><div class="row"><input id="n" placeholder="Name"><input id="p" placeholder="Phone"><input id="s" placeholder="Skills: cutting, stitching"><input id="k" type="number" placeholder="Pieces/day"><button onclick="addM()">Add member</button></div>
  <button class="secondary" onclick="api('/ledger/verify').then(v=>toast(v.valid?'Ledger intact ('+v.events+' events)':'TAMPERING at event '+v.broken_at,!v.valid)).catch(e=>toast(e.message,1))">Verify audit ledger</button></section>`;
 }
@@ -168,9 +199,50 @@ function renderPayouts(){
  $('#tab-panel').innerHTML=`<section class="card"><h2>Payouts</h2><p class="muted">Review reported pieces and rework before proposing payment. Settlement requires member approvals and no open disputes.</p>${orders.length?orders.map(o=>card(o)).join(''):'<p class="muted">No payout is waiting for review.</p>'}</section>`;
 }
 function renderPricing(){
- $('#tab-panel').innerHTML=`<section id="rate-card-panel"></section>`;
- if(rateCardsData)$('#rate-card-panel').innerHTML=renderRateCards(rateCardsData);
- else api('/leader/ratecards').then(data=>{rateCardsData=data;if(SakhiTabs.current().tab==='pricing')$('#rate-card-panel').innerHTML=renderRateCards(data);}).catch(e=>toast(e.message,1));
+ $('#tab-panel').innerHTML=`<section id="pricing-calculator" class="card"></section><section id="rate-card-panel"></section>`;
+ if(rateCardsData){renderPriceCalculator();$('#rate-card-panel').innerHTML=renderRateCards(rateCardsData);}
+ else api('/leader/ratecards').then(data=>{rateCardsData=data;if(SakhiTabs.current().tab==='pricing'){renderPriceCalculator();$('#rate-card-panel').innerHTML=renderRateCards(data);}}).catch(e=>toast(e.message,1));
+}
+function renderPriceCalculator(){
+ $('#pricing-calculator').innerHTML=`<h2>Price calculator</h2><p class="muted">Uses the group's active rate card. The calculation does not change an order.</p>
+ <div class="row"><label for="price-product">Product</label><select id="price-product">${rateCardsData.active.map(card=>`<option value="${esc(card.product)}">${esc(card.label)}</option>`).join('')}</select>
+ <label for="price-qty">Quantity</label><input id="price-qty" type="number" min="1" value="100">
+ <label for="price-offer">Offer per piece</label><input id="price-offer" type="number" min="0.01" step="0.01">
+ <button class="secondary" onclick="leaderPriceCheck()">Calculate</button></div><div id="price-result" aria-live="polite"></div>`;
+}
+function renderBuyers(){
+ $('#tab-panel').innerHTML=`<section class="card"><h2>Buyers</h2><p class="muted">Contact details load only when you choose to reveal them. Contact access is recorded.</p>
+ <div class="buyer-list">${buyersData.length?buyersData.map(b=>`<article class="card buyer-row"><div class="dashboard-heading"><div><h3>${esc(b.name)}</h3><p>${b.orders} order(s) · ${b.closed} delivered and closed</p><p>On-time delivery: ${b.on_time_pct==null?'Not enough due-date data':`${b.on_time_pct}%`}</p></div><span class="chip">${b.average_rating==null?'Not rated':`${b.average_rating}/5`}</span></div>
+ <p>Recorded balance due: ${money(b.balance_due)}</p><button class="secondary" onclick="leaderRevealBuyerContact(${b.id},'buyer-contact-${b.id}')">Show contact</button><span id="buyer-contact-${b.id}"></span></article>`).join(''):'<p class="muted">No buyers yet.</p>'}</div></section>`;
+}
+function renderAlerts(){
+ $('#tab-panel').innerHTML=`<section class="card"><div class="dashboard-heading"><div><h2>Alerts</h2><p class="muted">Items from your group that may need attention.</p></div><button class="secondary" onclick="loadLeaderExtra('alerts')">Refresh</button></div>
+ ${alertsData?.length?alertsData.map(item=>`<article class="decision-row"><span><b>${esc(item.label)}</b>${item.order_id?` · Order #${item.order_id}`:''}<br><span class="muted">${item.age_minutes==null?'Current':`${item.age_minutes} min ago`}</span></span><button class="secondary" onclick="location.hash='#${esc(item.action||'overview')}'">Open</button></article>`).join(''):'<p class="muted">No active alerts.</p>'}</section>`;
+}
+async function leaderRevealBuyerContact(buyerId,targetId){
+ try{
+  const contact=await api(`/leader/buyers/${Number(buyerId)}/contact`);
+  const node=document.getElementById(targetId);
+  node.innerHTML=`<p>${esc(contact.name)} · ${esc(contact.phone)}</p><div class="row"><a class="btn secondary" href="tel:${encodeURIComponent(contact.phone)}">☎ Call</a><a class="btn secondary" href="https://wa.me/${encodeURIComponent(contact.phone.replace('+',''))}" target="_blank" rel="noopener">WhatsApp</a></div>`;
+ }catch(error){toast(error.message,1);}
+}
+async function sendLeaderNotice(){
+ const recipient=$('#notice-recipient').value,message=$('#notice-message').value;
+ try{const result=await api('/leader/notices','POST',{message,member_id:recipient||null});toast(`Message sent to ${result.sent} member(s)`);$('#notice-message').value='';noticesData=await api('/leader/notices');renderTeam();}
+ catch(error){toast(error.message,1);}
+}
+async function resolveLeave(id,status){
+ const note=status==='declined'?prompt('Optional note for the member:'):'';
+ if(note===null)return;
+ try{await api(`/leader/leaves/${Number(id)}/resolve`,'POST',{status,note});toast('Leave request updated');leavesData=await api('/leader/leaves');renderTeam();}
+ catch(error){toast(error.message,1);}
+}
+async function leaderPriceCheck(){
+ try{
+  const result=await api('/leader/pricing/calculate','POST',{product:$('#price-product').value,qty:$('#price-qty').value,offered:$('#price-offer').value});
+  const p=result.price;
+  $('#price-result').innerHTML=`<p>Rate card ${esc(result.product)} v${result.version}</p><p>Price floor: ${money(p.per_unit.floor)} per piece · Suggested counter: ${money(p.suggested_counter)}</p><p>Effective hourly pay at offer: ${money(p.effective_hourly_at_offer)}/hr · Target: ${money(p.target_hourly)}/hr</p><p>${p.loss_making?'Offer is below the cost floor.':'Offer meets the cost floor.'}</p>`;
+ }catch(error){toast(error.message,1);}
 }
 function filterOrders(){
  const term=($('#order-search')?.value||'').trim().toLowerCase(),status=$('#status-filter')?.value||'';
@@ -192,8 +264,28 @@ function openOrder(id){location.hash=`#orders/${Number(id)}`;if(location.hash===
 async function showDrawer(id){
  try{const o=await api('/leader/orders/'+Number(id));if(SakhiTabs.current().item!==String(id))return;
   if(!$('#order-drawer'))document.body.insertAdjacentHTML('beforeend',`<div class="drawer-backdrop" id="order-drawer" role="dialog" aria-modal="true" aria-label="Order ${Number(id)} details" onclick="if(event.target===this)closeDrawer()"><section class="drawer"><div class="row"><h2>Order #${Number(id)}</h2><button class="secondary" onclick="closeDrawer()">Close</button></div><div id="drawer-content"></div></section></div>`);
-  $('#drawer-content').innerHTML=card(o);
+  $('#drawer-content').innerHTML=card(o)+`<section class="card buyer-detail-card"><h3>Buyer</h3><p>${esc(o.buyer?.name||o.buyer_name||'Buyer')}</p>
+   <button class="secondary" onclick="leaderRevealBuyerContact(${Number(o.buyer?.id)},'order-contact-${Number(id)}')">Show contact · access is recorded</button><div id="order-contact-${Number(id)}"></div>
+   <p>Specifications: ${esc(o.order.specifications||o.order.colour||'Not provided')}</p><p>Delivery address: ${esc(o.order.delivery_address||'Not provided')}</p>
+   <h3>Past orders with this group</h3>${o.buyer?.past_orders?.length?o.buyer.past_orders.map(previous=>`<p>Order #${previous.id} · ${esc(previous.product)} × ${previous.qty} · ${esc(previous.status)}</p>`).join(''):'<p class="muted">No earlier orders.</p>'}
+  </section><section class="card"><h3>Buyer payment record</h3><p>Status: ${esc(o.buyer_payment?.status||'not recorded')}</p>
+   ${(o.buyer_payment?.payments||[]).map(payment=>`<p>${esc(payment.status)} · ${money(payment.amount)}${payment.note?` · ${esc(payment.note)}`:''}</p>`).join('')}
+   <div class="row"><label for="pay-status-${Number(id)}">Status</label><select id="pay-status-${Number(id)}"><option value="unpaid">Unpaid</option><option value="advance">Advance</option><option value="paid">Paid</option></select>
+   <label for="pay-amount-${Number(id)}">Amount</label><input id="pay-amount-${Number(id)}" type="number" min="0" step="0.01">
+   <input id="pay-note-${Number(id)}" maxlength="250" placeholder="Note"><button onclick="recordBuyerPayment(${Number(id)})">Save payment record</button></div>
+  </section><section class="card"><h3>Private leader notes</h3>${(o.notes||[]).map(note=>`<p class="notice-row">${esc(note.note)} <span class="muted">${since(note.created)}</span></p>`).join('')||'<p class="muted">No notes yet.</p>'}
+   <textarea id="order-note-${Number(id)}" maxlength="500" placeholder="Only leaders can see this note"></textarea><button class="secondary" onclick="saveOrderNote(${Number(id)})">Add private note</button></section>`;
  }catch(e){toast(e.message,1);location.hash='#orders';}
+}
+async function saveOrderNote(id){
+ const note=$(`#order-note-${id}`).value;
+ try{await api(`/leader/orders/${id}/notes`,'POST',{note});toast('Private note saved');await showDrawer(id);}
+ catch(error){toast(error.message,1);}
+}
+async function recordBuyerPayment(id){
+ const status=$(`#pay-status-${id}`).value,amount=$(`#pay-amount-${id}`).value,note=$(`#pay-note-${id}`).value;
+ try{await api(`/leader/orders/${id}/buyer-payment`,'POST',{status,amount,note});toast('Buyer payment record saved');await showDrawer(id);buyersData=null;alertsData=null;}
+ catch(error){toast(error.message,1);}
 }
 function closeDrawer(navigate=true){const el=$('#order-drawer');if(el)el.remove();if(navigate&&SakhiTabs.current().item)location.hash='#orders';}
 async function refreshLive(batch){
@@ -206,7 +298,14 @@ async function refreshLive(batch){
    ...ids.map(id=>api('/leader/orders/'+id))
   ]);
   overviewData={...overviewData,...summary,orders:[...overviewData.orders]};
-  if(batch.some(x=>(x.refresh||[]).includes('team')))teamData=await api('/leader/team');
+  const scopes=new Set(batch.flatMap(x=>x.refresh||[]));
+  const extra=[];
+  if(scopes.has('team'))extra.push(api('/leader/team').then(data=>{teamData=data;}));
+  if(scopes.has('notices')||scopes.has('team'))extra.push(Promise.all([api('/leader/notices'),api('/leader/leaves')]).then(data=>{noticesData=data[0];leavesData=data[1];}));
+  if(scopes.has('buyers'))extra.push(api('/leader/buyers').then(data=>{buyersData=data;}));
+  if(scopes.has('alerts'))extra.push(api('/leader/alerts').then(data=>{alertsData=data;}));
+  if(scopes.has('pricing'))extra.push(api('/leader/ratecards').then(data=>{rateCardsData=data;}));
+  await Promise.all(extra);
   details.forEach(detail=>{
    const index=overviewData.orders.findIndex(o=>o.id===detail.id);
    if(index<0)return;
@@ -215,8 +314,8 @@ async function refreshLive(batch){
    detail.stages=Object.values(stages).map(stage=>({...stage,pct:stage.units?Math.floor(stage.done*100/stage.units):0}));
    overviewData.orders[index]={...overviewData.orders[index],...detail};
   });
-  if(batch.some(x=>(x.refresh||[]).includes('pricing')))rateCardsData=await api('/leader/ratecards');
   renderTab(SakhiTabs.current());
+  if($('#order-drawer')&&/^\d+$/.test(SakhiTabs.current().item||''))await showDrawer(Number(SakhiTabs.current().item));
  }catch(e){toast(e.message,1);}
 }
 async function load(){

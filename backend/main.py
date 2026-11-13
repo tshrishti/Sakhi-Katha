@@ -3,7 +3,7 @@ import asyncio, base64, contextlib, csv, hmac, io, json, logging, os, pathlib, t
 from xml.sax.saxutils import escape
 from sqlalchemy import func, select
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import auth, bootstrap, bot, db, events, media as mediafetch, svc, voice
 
@@ -76,6 +76,11 @@ def readyz():                                                 # readiness: datab
 def public():                                                  # only what the landing page needs to point people at the WhatsApp number
     return {"whatsapp": os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886").replace("whatsapp:", ""), "join": os.getenv("SANDBOX_JOIN_PHRASE", "")}
 
+@app.get("/app/go", include_in_schema=False)
+def magic_link_page():
+    return FileResponse(pathlib.Path(__file__).parent.parent / "frontend" / "app" / "go.html",
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
 # ---- auth ----
 @app.post("/api/auth/request-otp")
 def request_otp(b: dict): return auth.request_otp(b.get("phone", ""))
@@ -83,6 +88,12 @@ def request_otp(b: dict): return auth.request_otp(b.get("phone", ""))
 def verify(b: dict, resp: Response):
     u = auth.verify_otp(b.get("phone", ""), str(b.get("code", "")))
     resp.set_cookie("sk", auth.make_token(u["id"]), httponly=True, samesite="lax", secure=auth.SECURE_COOKIE, max_age=auth.TTL)
+    return {**u, "home": HOME[u["role"]]}
+@app.post("/api/auth/magic-link/verify")
+def verify_magic(b: dict, resp: Response):
+    u = svc.consume_magic_link(b.get("token", ""))
+    resp.set_cookie("sk", auth.make_token(u["id"]), httponly=True, samesite="lax",
+                    secure=auth.SECURE_COOKIE, max_age=auth.TTL)
     return {**u, "home": HOME[u["role"]]}
 @app.post("/api/auth/logout")
 def logout(resp: Response): resp.delete_cookie("sk"); return {"ok": True}
@@ -176,15 +187,29 @@ B = Depends(auth.require("buyer"))
 def products(): return svc.products()
 @app.get("/api/buyer/groups")
 def b_groups(u=B): return svc.groups()
+@app.get("/api/buyer/products")
+def b_products(u=B): return svc.buyer_products(u)
+@app.get("/api/buyer/home")
+def b_home(u=B): return svc.buyer_home(u)
+@app.get("/api/buyer/last-order")
+def b_last_order(u=B): return svc.last_order(u)
+@app.post("/api/buyer/group")
+def b_set_group(b: dict, u=B): return svc.set_preferred_group(u, b.get("group_id"))
 @app.post("/api/buyer/orders")
 def b_submit(b: dict, u=B): return svc.submit_order(u, int(b.get("group_id", 0)), str(b.get("text", ""))[:1000])
+@app.post("/api/buyer/orders/form")
+def b_submit_form(b: dict, u=B): return svc.buyer_submit_order(u, b.get("group_id"), b)
 @app.get("/api/buyer/orders")
 def b_orders(u=B): return svc.my_orders(u)
 @app.post("/api/buyer/orders/{oid}/accept")
 def b_accept(oid: int, u=B): return svc.accept_quote(u, oid)
 
 @app.post("/api/buyer/orders/{oid}/signoff")
-def b_signoff(oid: int, b: dict, u=B): return svc.signoff(u, oid, b.get("received"), b.get("note", ""), bool(b.get("final")))
+def b_signoff(oid: int, b: dict, u=B):
+    return svc.signoff(u, oid, b.get("received"), b.get("note", ""), bool(b.get("final")),
+                       b.get("rating"), b.get("rating_note", ""))
+@app.post("/api/buyer/orders/{oid}/rating")
+def b_rate(oid: int, b: dict, u=B): return svc.rate_buyer_group(u, oid, b.get("stars"), b.get("comment", ""))
 @app.post("/api/buyer/orders/{oid}/cancel")
 def b_cancel(oid: int, b: dict, u=B): return svc.cancel(u, oid, b.get("reason", ""))
 @app.get("/api/buyer/orders/{oid}/delivery/{i}/photo")
@@ -198,8 +223,33 @@ def l_orders(u=L): return svc.my_orders(u)
 def l_overview(summary: bool = False, u=L): return svc.leader_overview(u, summary_only=summary)
 @app.get("/api/leader/orders/{oid}")
 def l_order_detail(oid: int, u=L): return svc.leader_order_detail(u, oid)
+@app.get("/api/leader/orders/{oid}/notes")
+def l_order_notes(oid: int, u=L): return svc.leader_get_order_notes(u, oid)
+@app.post("/api/leader/orders/{oid}/notes")
+def l_add_order_note(oid: int, b: dict, u=L): return svc.leader_add_order_note(u, oid, b.get("note", ""))
+@app.post("/api/leader/orders/{oid}/buyer-payment")
+def l_buyer_payment(oid: int, b: dict, u=L):
+    return svc.leader_record_buyer_payment(u, oid, b.get("status"), b.get("amount"), b.get("note", ""))
+@app.get("/api/leader/notices")
+def l_notices(u=L): return svc.leader_notices(u)
+@app.post("/api/leader/notices")
+def l_send_notice(b: dict, u=L):
+    member_id = b.get("member_id")
+    return svc.leader_broadcast(u, b.get("message", ""), member_id if member_id not in ("", None) else None)
+@app.get("/api/leader/leaves")
+def l_leaves(u=L): return svc.leader_leave_requests(u)
+@app.post("/api/leader/leaves/{rid}/resolve")
+def l_resolve_leave(rid: int, b: dict, u=L): return svc.leader_resolve_leave(u, rid, b.get("status"), b.get("note", ""))
+@app.post("/api/leader/pricing/calculate")
+def l_price_calculate(b: dict, u=L): return svc.leader_price_calculate(u, b.get("product"), b.get("qty"), b.get("offered"))
 @app.get("/api/leader/team")
 def l_team(u=L): return svc.leader_team(u)
+@app.get("/api/leader/alerts")
+def l_alerts(u=L): return svc.leader_alerts(u)
+@app.get("/api/leader/buyers")
+def l_buyers(u=L): return svc.leader_buyers(u)
+@app.get("/api/leader/buyers/{buyer_id}/contact")
+def l_buyer_contact(buyer_id: int, u=L): return svc.leader_buyer_contact(u, buyer_id)
 @app.post("/api/leader/orders/{oid}/quote")
 def l_quote(oid: int, b: dict, u=L): return svc.quote(u, oid, b.get("counter"))
 @app.post("/api/leader/orders/{oid}/plan")
@@ -276,6 +326,14 @@ def s_accept(oid: int, u=M): return svc.accept_task(u, oid)
 def s_decline(oid: int, u=M): return svc.decline(u, oid)
 @app.post("/api/seller/orders/{oid}/issue")
 def s_issue(oid: int, b: dict, u=M): return svc.report_issue(u, oid, b.get("text", ""))
+@app.get("/api/seller/notices")
+def s_notices(u=M): return svc.member_notices(u)
+@app.post("/api/seller/notices/{nid}/seen")
+def s_notice_seen(nid: int, u=M): return svc.member_ack_notice(u, nid)
+@app.post("/api/seller/leave")
+def s_leave(b: dict, u=M): return svc.member_request_leave(u, b.get("days"), b.get("reason", ""))
+@app.post("/api/seller/concern")
+def s_concern(b: dict, u=M): return svc.member_raise_concern(u, b.get("message", ""))
 @app.post("/api/seller/orders/{oid}/payout/approve")
 def s_approve(oid: int, u=M): return svc.approve_payout(u, oid)
 @app.post("/api/seller/orders/{oid}/dispute")
@@ -288,6 +346,8 @@ def _img(data_url):
 # ---- officer / mission / federation: aggregates only ----
 @app.get("/api/officer/summary")
 def o_summary(u=Depends(auth.require("officer"))): return svc.officer_summary()
+@app.get("/api/officer/concerns")
+def o_concerns(u=Depends(auth.require("officer"))): return svc.officer_member_concerns(u)
 @app.get("/api/officer/export.csv")
 def o_export(u=Depends(auth.require("officer"))):
     rows = svc.officer_summary(); out = io.StringIO(); w = csv.DictWriter(out, ["group", "block", "district", "orders", "settled", "in_progress", "in_delivery", "closed", "blocked", "cancelled", "underpriced_offers", "open_disputes", "escalated_open"])

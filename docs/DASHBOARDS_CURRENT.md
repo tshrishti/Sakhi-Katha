@@ -1,84 +1,81 @@
 # Sakhi Khata dashboards: current state
 
-## Pages and client behavior
+## Pages and sign-in
 
-The app is static HTML with vanilla JavaScript under `frontend/app/`: `login.html`,
-`buyer.html`, `leader.html`, `seller.html` (the SHG member UI), and `officer.html`.
-`common.js` supplies same-origin `/api` requests, JSON bodies, HTML escaping,
-toasts, OTP-session bootstrapping, consent, and logout. `style.css` is the shared
-dark theme. Authenticated requests use the HttpOnly `sk` cookie; login is phone
-plus one-time code. The dashboards are long pages rather than tabs. The checked
-`common.js` and page scripts contain no polling timer or `EventSource`: pages
-load data when opened or after an action, with no server push or periodic
-refresh. Each page renders its main content with `innerHTML`.
+The static role dashboards live under `frontend/app/`: `buyer.html`,
+`leader.html`, `seller.html` (member), and `officer.html`. `/` redirects to the
+real sign-in flow; the archived prototype is not a live data source. Sign-in is
+phone plus a WhatsApp one-time code. The optional WhatsApp dashboard link is
+single-use, expires after `MAGIC_LINK_TTL_MIN` (10 minutes by default), and
+requires an explicit Continue click before the server consumes it.
 
-The buyer page submits and lists orders, accepts quotes, confirms deliveries,
-and cancels eligible orders. The leader page lists group orders and supports
-quoting, planning, starting, quality review, payouts, delivery, member
-management, and rate cards. The member page lists only that member's tasks and
-earnings and supports task acceptance/decline, progress, samples, payout
-approval/disputes, and rate-card votes. The officer page shows aggregate group
-counts and CSV export. `archive/old-prototype/` is not served; it is not a
-source of live application data.
+The dashboards use a shared dark, responsive theme, role-protected same-origin
+JSON API calls, an HttpOnly session cookie, language preference (English,
+Hindi, or Hinglish), and a consent prompt. The leader, member, and buyer pages
+use tabs. The mission-officer page remains an aggregate report with a
+private-member-concerns inbox.
 
-## API routes
+## Live updates and shared rules
 
-`backend/main.py` exposes health/readiness and public configuration; OTP
-request/verify/logout, `/api/me`, language, and consent; buyer products,
-groups, orders, quote acceptance, sign-off, cancellation, and delivery photos;
-leader order reads and quote/plan/start/payout/dispute/quality/risk/checklist/
-delivery/block/cancel actions, members, and rate cards; member tasks, earnings,
-progress, samples, checklists, task acceptance/decline, payout approval/dispute,
-and rate-card approval; officer aggregate summary and CSV export; cron
-reminders/escalation; ledger verification; and the Twilio `/whatsapp` webhook.
-Dashboard routes require the corresponding role. The shared service layer also
-checks order ownership and group scope.
+`backend/svc.py` is the shared business-rule layer used by the dashboard routes
+and WhatsApp bot. State changes append to the existing hash-chained ledger;
+the sequence, payload, and hash fields are not changed by dashboard rendering.
+Role-projected server-sent events notify connected dashboards, with bounded
+polling as a fallback. The member, buyer, and leader pages reload the affected
+views after relevant events and skip replacing content while the user is
+typing.
 
-## Services, roles, and persistence
+Dashboard actions use the same service functions and database as WhatsApp.
+Leader messages, leave requests, member concern reports, buyer orders and
+ratings, payment records, and magic-link issuance are persisted and audited.
+Outbound WhatsApp message language follows the recipient's saved language.
 
-`backend/svc.py` is the shared rule layer used by routes and the bot. Order
-submission, group selection, buyer order reads, quote acceptance, and sign-off
-are buyer-scoped (leaders can submit on behalf of a buyer where allowed).
-Order reads and lifecycle changes are scoped to the buyer or the leader/member's
-group. Quote, plan/start, payout proposal/leader approval, dispute resolution,
-sample review, checklist editing, risk, delivery, member management, and rate
-card proposal/rejection are leader-only. Task/earnings reads, task acceptance
-or decline, progress, sample submission, payout approval/dispute, and rate-card
-approval are member-scoped. Checklist reads are available to leaders and
-members assigned to the order. Consent/language are for the authenticated
-account; registration, join-request and role-switch helpers are restricted by
-their own onboarding/owner rules. Officer reporting returns aggregates only.
-Reminder and escalation routines run as scheduled system work.
+## Role dashboards
 
-The service layer covers group/order lookup, product/rate-card snapshots,
-deterministic pricing and allocation, sample screening, payout quorum and
-dispute rules, delivery state, join approval, language, and reminder/
-escalation helpers. State changes append to the existing hash-chained `ledger`;
-its sequence, payload, and hashed fields are the audit source and are not
-modified by dashboard rendering.
+- **Buyer:** Home, Orders, New order, Group, and Me. Buyers can choose a group,
+  submit structured orders, repeat a prior order, accept quotes, confirm
+  delivery (including a shortfall decision), rate a closed order, and view
+  their supplier-group passport. Buyer views do not expose production plans,
+  member names, cost floors, or member pay.
+- **Group leader:** Overview, Orders, Team, Quality, Delivery, Payouts,
+  Buyers, Pricing, and Alerts. Buyer contact is revealed only on explicit
+  request and that access is recorded. Order notes are leader-only. Buyer
+  payment records are informational; Sakhi Khata does not process payments.
+- **Member:** Home, My tasks, Earnings, Notices, and Me. Members see their own
+  assignments and earnings, can accept or decline work, report progress,
+  submit samples/issues, approve or dispute payouts, acknowledge leader
+  messages, request leave, and send a private concern to mission officers.
+- **Mission officer:** Aggregate group summary and CSV export, ledger
+  verification, and the private member-concerns inbox. Concern details are
+  unavailable to group leaders. The broader hierarchical government dashboard
+  and scoped provisioning are not implemented.
 
-`backend/db.py` currently defines `groups` (id, name, village, block, district),
-`users` (id, phone, name, role, group, skills, capacity, active, consent time,
-language, preferred group), `orders` (id, group, buyer, status, JSON data,
-created time), `ledger` (sequence/type/actor/order/payload/time/hash chain),
-OTP and WhatsApp conversation state, group invites and join requests, and
-versioned rate cards. `create_all` creates tables; `ensure_columns` safely adds
-the existing `lang` and `preferred_group_id` columns. It does not currently
-provide an event stream, notices, leave requests, buyer payment/rating records,
-order notes, access log, or magic-link tokens.
+## API, authorization, and privacy
 
-## WhatsApp, localization, and tests
+`backend/main.py` exposes role-scoped endpoints for buyer home/products/groups,
+structured orders and ratings; leader team, buyer/contact, alerts, notices,
+leaves, pricing calculations, order notes, and buyer payment records; member
+home, tasks, earnings, notices, leaves, and private concerns; and officer
+aggregates and concerns. Role and group/order scope checks remain in the
+service layer. Contact reads write to `access_log`; personal phone numbers are
+not included in buyer-list or SSE responses. Private concerns are stored for
+officers and omitted from leader event projections.
 
-`backend/auth.py` verifies OTPs and signs role-bearing HttpOnly sessions.
-`backend/notify.py` sends best-effort WhatsApp messages through Twilio.
-`backend/bot.py` routes typed commands and inbound media; `backend/convo.py`
-stores guided conversation state in `chat_state` with legacy `convos` fallback.
-Both call `svc.py`, so dashboard and WhatsApp state changes use the same
-database and rules. English, Hindi, and Hinglish are available; the user's
-language is persisted in `users.lang` and shared with message rendering.
+`backend/db.py` defines notices, leave requests, buyer payments/ratings, private
+order notes, one-time magic links, access logs, and member concerns alongside
+the existing group, user, order, OTP, and ledger tables. `create_all` creates
+the added tables for existing databases.
 
-`backend/test_app.py` exercises OTP/RBAC, role isolation, order/payout and
-delivery lifecycles, WhatsApp parity, group/rate-card behavior, and aggregate
-privacy. `backend/test_engine.py` covers deterministic pricing, allocation,
-payout, parsing, feasibility, and ledger tamper detection. Existing frontend
-tests are not present. The old mock-up has no live role or database connection.
+## Localization and validation
+
+English, Hindi, and Hinglish are currently supported. Kannada translations,
+text-to-speech earnings playback, email/password authentication, payment
+processing, and the hierarchical government dashboard remain out of scope.
+WhatsApp remains supported as the primary channel.
+
+`backend/test_app.py`, `backend/test_engine.py`, and `backend/test_events.py`
+cover role access, order and payout rules, bot/dashboard parity, event
+projection, buyer privacy, member concerns, and audit-ledger integrity.
+Frontend scripts are plain JavaScript with no separate frontend test runner;
+validate their syntax with Node and run the backend suite with
+`python -m pytest -q`.

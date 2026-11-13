@@ -131,12 +131,13 @@
 }
 @keyframes changed { 0%, 45% { box-shadow: 0 0 0 3px #54a98d88; } 100% { box-shadow: var(--shadow); } }
 @media (max-width: 700px) {
+  html, body { overflow-x: clip; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .member-kpis { grid-template-columns: 1fr; }
   .login-layout { grid-template-columns: 1fr; min-height: auto; padding: 20px 14px 90px; }
   .login-intro { display: none; }
   .login-card { padding: 18px; }
-  .dashboard-tabs { position: fixed; z-index: 10; right: 12px; bottom: 10px; left: 12px; justify-content: flex-start; overflow-x: auto; box-shadow: 0 4px 20px #0002; }
+  .dashboard-tabs { position: fixed; z-index: 10; right: 12px; bottom: 10px; left: 12px; width: calc(100vw - 24px); min-width: 0; box-sizing: border-box; justify-content: flex-start; overflow-x: auto; box-shadow: 0 4px 20px #0002; }
   .dashboard-tabs [role="tab"] { flex: 1 0 auto; padding: 6px 10px; }
   .order-tile { align-items: flex-start; }
 }

@@ -187,5 +187,5 @@ def test_member_home_and_leader_team_share_dashboard_and_whatsapp_updates(world)
         member_user = member.get("/api/me").json()
         projected = [events.project(row, member_user, order) for row in rows]
         assert len(projected) == 2
-        assert all(event and event["refresh"] == ["tasks", "earnings"] for event in projected)
+        assert all(event and event["refresh"] == ["tasks", "earnings", "notices"] for event in projected)
         assert all("payload" not in event and "actor" not in event for event in projected)

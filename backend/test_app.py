@@ -101,11 +101,13 @@ def test_unknown_number_gets_nothing_when_registration_is_off(world, monkeypatch
     assert "not registered" in bot.handle("whatsapp:+911234567899", "hi")
 
 def test_no_demo_surface_left(world):
+    from pathlib import Path
     c = TestClient(world.app)
     for path in ("/api/config", "/api/demo", "/api/demo/state", "/live.html", "/3d.html"): assert c.get(path).status_code == 404
     for path in ("/api/auth/demo", "/api/demo/chat", "/api/demo/reset"): assert c.post(path, json={"role": "leader"}).status_code in (404, 405)
-    # assert "demo" not in open("../frontend/app/login.html").read().lower() and "demo" not in open("../frontend/index.html").read().lower()
-    assert "demo" not in open("../frontend/app/login.html", encoding="utf-8").read().lower() and "demo" not in open("../frontend/index.html", encoding="utf-8").read().lower()
+    frontend = Path(__file__).resolve().parent.parent / "frontend"
+    assert "demo" not in (frontend / "app" / "login.html").read_text(encoding="utf-8").lower()
+    assert "demo" not in (frontend / "index.html").read_text(encoding="utf-8").lower()
 def test_owner_phone_is_bootstrapped_and_can_switch_role(world, monkeypatch):
     import db
     from sqlalchemy import select
@@ -578,6 +580,118 @@ def test_buyer_selects_and_remembers_group_and_can_change_it(world):
     with db.S() as s:
         buyer = s.scalars(select(db.User).where(db.User.phone == BUYER)).one()
         assert buyer.preferred_group_id == 1
+
+def test_phase_three_buyer_order_details_and_logged_contact(world):
+    import db
+    from sqlalchemy import select
+    buyer, leader, member = world.login(BUYER), world.login(LEADER), world.login(SELLER)
+    group_id = buyer.get("/api/buyer/groups").json()[0]["id"]
+    submitted = buyer.post("/api/buyer/orders/form", json={
+        "group_id": group_id, "product": "cloth_bag", "qty": 100,
+        "offered_price": 90, "deadline_days": 10, "colour": "Blue",
+        "delivery_address": "Test address", "specifications": "Stitch securely"
+    })
+    assert submitted.status_code == 200 and submitted.json()["product"] == "cloth_bag"
+    order_id = submitted.json()["id"]
+    assert leader.post("/api/leader/pricing/calculate",
+                       json={"product": "cloth_bag", "qty": 100, "offered": 90}).status_code == 200
+
+    buyer_home = buyer.get("/api/buyer/home").json()
+    assert buyer_home["orders"][0]["id"] == order_id
+    assert "phone" not in buyer_home["profile"]
+    detail = leader.get(f"/api/leader/orders/{order_id}").json()
+    assert detail["buyer"]["name"] == "Test Buyer" and "phone" not in detail["buyer"]
+    assert detail["buyer"]["past_orders"] == []
+    assert leader.get("/api/leader/buyers").json()[0]["on_time_pct"] is None
+
+    assert leader.post(f"/api/leader/orders/{order_id}/notes", json={"note": "Private follow-up"}).status_code == 200
+    assert "Private follow-up" in str(leader.get(f"/api/leader/orders/{order_id}").json()["notes"])
+    assert "Private follow-up" not in str(buyer.get("/api/buyer/orders").json())
+    assert member.post(f"/api/leader/orders/{order_id}/notes", json={"note": "Not allowed"}).status_code == 403
+    assert member.get(f"/api/leader/buyers/{buyer_home['profile'].get('id', 0)}/contact").status_code == 403
+
+    contact = leader.get(f"/api/leader/buyers/{detail['buyer']['id']}/contact")
+    assert contact.status_code == 200 and contact.json()["phone"] == BUYER
+    with db.S() as s:
+        entry = s.scalars(select(db.AccessLog).where(db.AccessLog.action == "buyer_contact_viewed")).first()
+        assert entry and entry.actor_id == leader.get("/api/me").json()["id"]
+
+def test_phase_three_member_notices_leave_and_private_concern(world):
+    import db, events
+    from datetime import date, timedelta
+    from sqlalchemy import select
+    member, leader, officer = world.login(SELLER), world.login(LEADER), world.login(OFFICER)
+    member_id = member.get("/api/me").json()["id"]
+
+    sent = leader.post("/api/leader/notices", json={"message": "Please check tomorrow's plan", "member_id": member_id})
+    assert sent.status_code == 200 and sent.json()["sent"] == 1
+    notice = member.get("/api/seller/notices").json()["messages"][0]
+    assert notice["message"] == "Please check tomorrow's plan" and not notice["seen"]
+    assert member.post(f"/api/seller/notices/{notice['id']}/seen").json()["seen"]
+    assert leader.get("/api/leader/notices").json()[0]["seen"]
+
+    day = (date.today() + timedelta(days=2)).isoformat()
+    leave = member.post("/api/seller/leave", json={"days": [day], "reason": "Family work"})
+    assert leave.status_code == 200 and leave.json()["status"] == "pending"
+    request = leader.get("/api/leader/leaves").json()[0]
+    assert request["days"] == [day]
+    assert leader.post(f"/api/leader/leaves/{request['id']}/resolve", json={"status": "approved"}).json()["status"] == "approved"
+    assert member.get("/api/seller/notices").json()["leave_requests"][0]["status"] == "approved"
+
+    concern = member.post("/api/seller/concern", json={"message": "I need confidential support"})
+    assert concern.status_code == 200
+    assert leader.get("/api/officer/concerns").status_code == 403
+    assert member.get("/api/officer/concerns").status_code == 403
+    inbox = officer.get("/api/officer/concerns").json()
+    assert inbox and inbox[0]["message"] == "I need confidential support"
+    assert inbox[0]["member"] == "Shobha" and inbox[0]["group"] == "Test SHG"
+    assert any("I need confidential support" in item["text"] for item in world.sent if item["phone"] == OFFICER)
+    with db.S() as s:
+        event = s.scalars(select(db.LedgerEvent).where(db.LedgerEvent.type == "concern.raised")).one()
+        leader_user = leader.get("/api/me").json()
+        assert events.project(event, leader_user) is None
+        assert "I need confidential support" not in str(event.payload)
+    assert "I need confidential support" not in str(leader.get("/api/leader/overview").json()["activity"])
+
+def test_phase_three_buyer_payment_record_and_continue_before_magic_link(world, monkeypatch):
+    import db, svc
+    from urllib.parse import parse_qs, urlparse
+    from sqlalchemy import select
+    buyer, leader = world.login(BUYER), world.login(LEADER)
+    group_id = buyer.get("/api/buyer/groups").json()[0]["id"]
+    order_id = buyer.post("/api/buyer/orders", json={"group_id": group_id, "text": ORDER}).json()["id"]
+    assert leader.post(f"/api/leader/orders/{order_id}/buyer-payment",
+                       json={"status": "paid", "amount": 100}).status_code == 409
+
+    leader.post(f"/api/leader/orders/{order_id}/quote", json={})
+    buyer.post(f"/api/buyer/orders/{order_id}/accept")
+    leader.post(f"/api/leader/orders/{order_id}/plan")
+    leader.post(f"/api/leader/orders/{order_id}/start")
+    leader.post(f"/api/leader/orders/{order_id}/payout", json={})
+    leader.post(f"/api/leader/orders/{order_id}/payout/approve")
+    for phone in ("+919000000101", "+919000000102"):
+        world.login(phone).post(f"/api/seller/orders/{order_id}/payout/approve")
+    assert leader.get(f"/api/leader/orders/{order_id}").json()["status"] == "settled"
+    payment = leader.post(f"/api/leader/orders/{order_id}/buyer-payment",
+                          json={"status": "advance", "amount": 100, "note": "Cash received"})
+    assert payment.status_code == 200 and payment.json()["status"] == "advance"
+    assert buyer.get("/api/buyer/home").json()["orders"][0]["buyer_payment"]["amount"] == 100
+
+    monkeypatch.setenv("ENV", "prod")
+    monkeypatch.setenv("PUBLIC_URL", "https://sakhi.example")
+    link = svc.issue_magic_link(BUYER)
+    parsed = urlparse(link["url"])
+    assert parsed.path == "/app/go" and parsed.fragment == "home"
+    token = parse_qs(parsed.query)["t"][0]
+    c = TestClient(world.app)
+    page = c.get(link["url"].replace("https://sakhi.example", ""))
+    assert page.status_code == 200 and "Continue" in page.text and "no-store" in page.headers["cache-control"]
+    with db.S() as s:
+        row = s.scalars(select(db.MagicLink).where(db.MagicLink.phone == BUYER)).one()
+        assert row.used_at is None
+    verified = c.post("/api/auth/magic-link/verify", json={"token": token})
+    assert verified.status_code == 200 and verified.json()["role"] == "buyer"
+    assert c.post("/api/auth/magic-link/verify", json={"token": token}).status_code == 401
 
 def test_expired_flow_requires_resume_and_navigation_does_not_cancel(world):
     import time

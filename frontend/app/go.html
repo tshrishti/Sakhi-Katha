@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Continue to Sakhi Khata</title>
+  <link rel="stylesheet" href="style.css?v=phase3b">
+</head>
+<body>
+  <main class="login-layout">
+    <section class="login-card">
+      <a class="login-brand" href="/">Sakhi Khata</a>
+      <h1>Continue to your dashboard</h1>
+      <p class="muted">For your safety, this link signs you in only after you press Continue.</p>
+      <button id="continue" type="button" disabled>Continue</button>
+      <p id="message" class="login-help" role="status" aria-live="polite"></p>
+      <a class="btn secondary" href="/app/login.html">Use phone sign-in instead</a>
+    </section>
+  </main>
+  <div id="toast" role="status"></div>
+  <script src="common.js?v=phase3"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const token = params.get('t');
+    const destination = /^#[a-z][a-z0-9_-]*(\/[a-zA-Z0-9_-]+)*$/.test(location.hash) ? location.hash : '';
+    history.replaceState(null, '', location.pathname + destination);
+    const button = document.getElementById('continue');
+    const message = document.getElementById('message');
+    button.disabled = !token;
+    if (!token) message.textContent = 'This sign-in link is missing or has already been opened. Request a new one on WhatsApp.';
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      message.textContent = 'Signing you in…';
+      try {
+        const result = await api('/auth/magic-link/verify', 'POST', {token});
+        message.textContent = 'Signed in. Opening your dashboard…';
+        location.replace(result.home + destination);
+      } catch (error) {
+        message.textContent = error.message || 'This link is invalid or expired. Request a new one on WhatsApp.';
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

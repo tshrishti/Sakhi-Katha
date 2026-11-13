@@ -20,9 +20,11 @@ The default database is local SQLite. For a persistent deployment, configure `DA
 
 The root URL now opens the real sign-in flow; it no longer serves the disconnected mock dashboard. The role-based dashboards use the same backend and database as WhatsApp.
 
-The leader dashboard has Overview, Orders, Team, Quality, Delivery, Payouts, and Pricing tabs, with role-scoped data and ledger-backed live updates. The member dashboard has Home, My tasks, and Earnings tabs, with private work/pay data, task and issue actions, and live updates. Buyer and government dashboard upgrades, messaging/leave flows, and remaining account/profile features are planned for later phases.
+The leader dashboard has Overview, Orders, Team, Quality, Delivery, Payouts, Buyers, Pricing, and Alerts tabs. Members have Home, My tasks, Earnings, Notices, and Me; buyers have Home, Orders, New order, Group, and Me. The mission-officer page provides group aggregates and a private member-concerns inbox. Each dashboard uses the same backend rules as WhatsApp and refreshes from role-projected live events, with polling as a fallback. WhatsApp dashboard links require a Continue click and expire after the configured `MAGIC_LINK_TTL_MIN`.
 
-The pre-change architecture and verified behavior are in [docs/DASHBOARDS_CURRENT.md](docs/DASHBOARDS_CURRENT.md). The WhatsApp chatbot baseline is in [docs/CHATBOT_CURRENT.md](docs/CHATBOT_CURRENT.md).
+The officer page is currently aggregate reporting plus the private concern inbox; the full hierarchical government dashboard and scoped user provisioning are not implemented. See [docs/DASHBOARDS_CURRENT.md](docs/DASHBOARDS_CURRENT.md) for role scope, privacy boundaries, and remaining gaps.
+
+The dashboard behavior and API overview are in [docs/DASHBOARDS_CURRENT.md](docs/DASHBOARDS_CURRENT.md). The WhatsApp chatbot baseline is in [docs/CHATBOT_CURRENT.md](docs/CHATBOT_CURRENT.md).
 
 ## Tests
 

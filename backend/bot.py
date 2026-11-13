@@ -8,7 +8,7 @@ import auth, bootstrap, convo, db, i18n, svc
 SEEN, PREF, ONB = set(), {}, {}
 SKILLS = {"1": "cutting", "2": "stitching", "3": "finishing", "4": "packing"}
 HELP = {"buyer": "Send your order as text or voice (quantity, price per piece, days). STATUS lists orders. ACCEPT <id> accepts a quote. RECEIVED <id> <pieces> confirms delivery (add FINAL to accept a shortfall). CANCEL <id> before work starts. LANG 1/2/3 changes language.",
-        "leader": "ORDERS, QUOTE <id> [price], PLAN <id>, START <id>, PASS <id> <name>, REWORK <id> <name> <pieces> <reason>, RISK <id> [days left], PROGRESS <id>, CHECKLIST <id>, PAYOUT <id> [name rework-count], APPROVE <id>, RESOLVE <id> <note>, READY <id> <packed pieces>, DISPATCH <id> <courier> [tracking], BLOCK <id> <reason>, UNBLOCK <id>, CANCEL <id> <reason>."}
+        "leader": "ORDERS, QUOTE <id> [price], PLAN <id>, START <id>, PASS <id> <name>, REWORK <id> <name> <pieces> <reason>, RISK <id> [days left], PROGRESS <id>, CHECKLIST <id>, PAYOUT <id> [name rework-count], APPROVE <id>, RESOLVE <id> <note>, READY <id> <packed pieces>, DISPATCH <id> <courier> [tracking], BLOCK <id> <reason>, UNBLOCK <id>, CANCEL <id> <reason>, MESSAGE ALL <text>, LEAVES, LEAVEAPPROVE <id> [note]."}
 
 def _id(w):
     try: return int(w[1])
@@ -28,6 +28,10 @@ def _buyer(u, t, w, media):
         v = svc.signoff(u, _id(w), w[2], " ".join(t.split()[3:]), "final" in w[3:]); d = v["delivery"]
         return f"Thank you. Order #{v['id']}: {d['delivered']} of {d['ordered']} pieces received. Status: {_st(v)}."
     if c == "cancel": v = svc.cancel(u, _id(w), " ".join(t.split()[2:])); return f"Order #{v['id']} cancelled."
+    if c == "rate":
+        if len(w) < 3: raise svc.Err(422, "Send RATE <order> <1-5> [comment]")
+        result = svc.rate_buyer_group(u, _id(w), w[2], " ".join(t.split()[3:]))
+        return f"Thank you for rating the group {result['stars']}/5."
     if c == "group":
         if len(w) < 2: return convo.change_group(u, auth.norm(u["phone"]))
         svc.set_preferred_group(u, _id(w)); return "Group selected."
@@ -122,6 +126,21 @@ def _seller(u, t, w, media):
     if c == "decline": svc.decline(u, _id(w)); return i18n.t("declined", L)
     if c == "approve": v = svc.approve_payout(u, _id(w)); return i18n.t("thanks", L, st=_st(v))
     if c == "dispute": svc.dispute(u, _id(w), " ".join(w[2:]) or "no reason given"); return i18n.t("disputed", L)
+    if c == "notices":
+        result = svc.member_notices(u)
+        lines = [f"#{x['id']} {'Seen' if x['seen'] else 'New'}: {x['message']}" for x in result["messages"][:8]]
+        lines.extend(f"Leave #{x['id']}: {x['status']} ({', '.join(x['days'])})" for x in result["leave_requests"][:4])
+        return "\n".join(lines) or "No notices yet."
+    if c == "seen":
+        if len(w) < 2 or not w[1].isdigit(): raise svc.Err(422, "Send SEEN <message number>")
+        svc.member_ack_notice(u, int(w[1])); return "Message marked as seen."
+    if c == "leave":
+        if len(w) < 2: raise svc.Err(422, "Send LEAVE yyyy-mm-dd [yyyy-mm-dd] [reason]")
+        days = [word.strip(",") for word in w[1:] if len(word.strip(",")) == 10 and word.strip(",")[4:5] == "-"]
+        day_set = set(days)
+        reason = " ".join(word for word in w[1:] if word.strip(",") not in day_set)
+        result = svc.member_request_leave(u, days, reason)
+        return f"Leave request #{result['id']} sent to your leader."
     return i18n.t("help_seller", L)
 
 def _onboard(phone, t, msg_id):
@@ -182,6 +201,21 @@ def handle(sender, text, msg_id=None, media=None):
         code = i18n.LANGS.get(w[-1]) if len(w) > 0 and w[-1] in i18n.LANGS else None
         if not code: return i18n.t("menu", u["lang"])
         svc.set_lang(u, code); return i18n.t("lang_set", code)
+    if w and w[0] in ("web", "link", "login"):
+        link = svc.issue_magic_link(phone)
+        return (f"Your secure sign-in link (valid for {max(1, link['expires_in'] // 60)} minutes):\n{link['url']}"
+                if link.get("url") else "If this number is registered, a sign-in link will be sent.")
+    if u["role"] == "leader" and w and w[0] == "message":
+        if len(w) < 3 or w[1] != "all": return "Send MESSAGE ALL <message>."
+        result = svc.leader_broadcast(u, " ".join(t.split()[2:]))
+        return f"Message sent to {result['sent']} member(s)."
+    if u["role"] == "leader" and w and w[0] == "leaves":
+        rows = svc.leader_leave_requests(u)
+        return "\n".join(f"#{x['id']} {x['member']}: {', '.join(x['days'])} [{x['status']}]" for x in rows[:8]) or "No leave requests."
+    if u["role"] == "leader" and w and w[0] == "leaveapprove":
+        if len(w) < 2 or not w[1].isdigit(): raise svc.Err(422, "Send LEAVEAPPROVE <request> [note]")
+        result = svc.leader_resolve_leave(u, int(w[1]), "approved", " ".join(t.split()[2:]))
+        return f"Leave request #{result['id']} approved."
     try:
         r = convo.handle(u, phone, t, w, media)                                   # guided conversation first; typed commands remain the fallback
         if r is not None: return r

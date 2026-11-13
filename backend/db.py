@@ -71,6 +71,58 @@ class RateCard(Base):                  # per-group, versioned; status: proposed 
     leader_ok = Column(Boolean, default=False); member_ok = Column(JSON, default=list)
     created = Column(Float); approved_at = Column(Float)
 
+class Notice(Base):
+    __tablename__ = "notices"
+    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False)
+    user_id = Column(Integer); sender_id = Column(Integer, nullable=False)
+    message = Column(String, nullable=False); created = Column(Float, nullable=False)
+    seen_at = Column(Float)
+
+class LeaveRequest(Base):
+    __tablename__ = "leave_requests"
+    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False); days = Column(JSON, nullable=False)
+    reason = Column(String, default=""); status = Column(String, nullable=False, default="pending")
+    resolution = Column(String, default=""); created = Column(Float, nullable=False)
+    updated = Column(Float, nullable=False)
+
+class BuyerPayment(Base):
+    __tablename__ = "buyer_payments"
+    id = Column(Integer, primary_key=True); order_id = Column(Integer, nullable=False)
+    status = Column(String, nullable=False); amount = Column(Float, nullable=False)
+    paid_at = Column(Float); note = Column(String, default=""); actor_id = Column(Integer, nullable=False)
+
+class OrderNote(Base):
+    __tablename__ = "order_notes"
+    id = Column(Integer, primary_key=True); order_id = Column(Integer, nullable=False)
+    leader_id = Column(Integer, nullable=False); note = Column(String, nullable=False)
+    created = Column(Float, nullable=False)
+
+class BuyerRating(Base):
+    __tablename__ = "buyer_ratings"
+    id = Column(Integer, primary_key=True); order_id = Column(Integer, unique=True, nullable=False)
+    buyer_id = Column(Integer, nullable=False); group_id = Column(Integer, nullable=False)
+    stars = Column(Integer, nullable=False); comment = Column(String, default="")
+    created = Column(Float, nullable=False)
+
+class MagicLink(Base):
+    __tablename__ = "magic_links"
+    id = Column(Integer, primary_key=True); phone = Column(String, nullable=False)
+    token_hash = Column(String, unique=True, nullable=False); expires = Column(Float, nullable=False)
+    used_at = Column(Float); created = Column(Float, nullable=False)
+
+class AccessLog(Base):
+    __tablename__ = "access_log"
+    id = Column(Integer, primary_key=True); actor_id = Column(Integer, nullable=False)
+    action = Column(String, nullable=False); target_id = Column(Integer)
+    created = Column(Float, nullable=False)
+
+class MemberConcern(Base):
+    __tablename__ = "member_concerns"
+    id = Column(Integer, primary_key=True); group_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False); message = Column(String, nullable=False)
+    created = Column(Float, nullable=False)
+
 class DBLedger:
     """Persistent, append-only, hash-chained audit log. Same chain rules as engine.Ledger."""
     def append(self, type_, payload, actor, order_id=None, s=None):

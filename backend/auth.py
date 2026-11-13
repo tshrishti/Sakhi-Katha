@@ -76,7 +76,8 @@ def current_user(request: Request):
         if not u.last_active_at or now - u.last_active_at >= 30:
             u.last_active_at = now
             s.commit()
-        return {"id": u.id, "name": u.name, "role": u.role, "group_id": u.group_id, "phone": u.phone, "consented": bool(u.consent_at)}
+        return {"id": u.id, "name": u.name, "role": u.role, "group_id": u.group_id,
+                "phone": u.phone, "lang": u.lang or "en", "consented": bool(u.consent_at)}
 
 def require(*roles):
     def dep(request: Request):

@@ -1,6 +1,6 @@
-@import url("css/tokens.css?v=desktop");
-@import url("css/base.css?v=desktop");
-@import url("css/components.css?v=desktop");
+@import url("css/tokens.css?v=phase3b");
+@import url("css/base.css?v=phase3b");
+@import url("css/components.css?v=phase3b");
 
 .ai { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--warn-text); border-radius: 0 8px 8px 0; background: #1d2948; color: var(--text); }
 .ai ul { margin: 4px 0; padding-left: 18px; }
