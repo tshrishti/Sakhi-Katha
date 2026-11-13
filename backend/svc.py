@@ -1,6 +1,6 @@
 """Business rules shared by the REST dashboards and the WhatsApp bot. Every function checks the caller's role and scope."""
 import math, os, time
-from sqlalchemy import select
+from sqlalchemy import func, select
 import db, engine as E, i18n, llm, notify, screening
 import defaults, ratecards
 
@@ -75,6 +75,135 @@ def _progress(o):
     for r in rows: by[r["stage"]] = by.get(r["stage"], 0) + r["done"]
     return {"rows": rows, "finished": min(by.values()) if by else 0, "needed": o.data["order"]["qty"],      # a piece is finished only when it has passed EVERY stage
             "pct": int(100 * sum(r["done"] for r in rows) / tot) if tot else 0}
+
+def order_health(order, now=None):
+    """Return the leader-facing health label from the order's persisted facts."""
+    now = time.time() if now is None else now
+    status = order.get("status")
+    if status not in ("closed", "cancelled") and order.get("due_at") is not None and order["due_at"] < now:
+        return "Late"
+    if status == "blocked" or (order.get("delivery") or {}).get("blocked"):
+        return "Blocked"
+    if (order.get("risk") or {}).get("shortfall"):
+        return "At risk"
+    if order.get("needs_leader"):
+        return "Waiting"
+    stale_hours = max(1, int(os.getenv("STALE_HOURS", "24")))
+    if status == "in_production":
+        last_report = order.get("last_reported_at") or order.get("started_at") or order.get("created")
+        if last_report is None or now - last_report >= stale_hours * 3600:
+            return "Stale"
+    return "On track"
+
+def leader_overview(user, now=None, summary_only=False):
+    """Leader-scoped overview data assembled from the same orders and ledger as WhatsApp."""
+    _leader_only(user)
+    now = time.time() if now is None else now
+    day_start = now - ((now + 5 * 3600 + 30 * 60) % 86400)
+    with db.S() as s:
+        group = s.get(db.Group, user["group_id"])
+        latest_seq = s.scalar(select(func.max(db.LedgerEvent.i)))
+        orders = list(s.scalars(select(db.Order).where(db.Order.group_id == user["group_id"]).order_by(db.Order.id.desc())))
+        order_ids = [o.id for o in orders]
+        events = list(s.scalars(select(db.LedgerEvent).where(db.LedgerEvent.order_id.in_(order_ids)).order_by(db.LedgerEvent.i))) if order_ids else []
+        latest_report, started_at, pieces_today = {}, {}, {}
+        previous_done = {}
+        for event in events:
+            if event.type == "production.started":
+                started_at[event.order_id] = event.ts
+            if event.type != "progress.reported":
+                continue
+            latest_report[event.order_id] = max(latest_report.get(event.order_id, 0), event.ts or 0)
+            payload = event.payload or {}
+            key = (event.order_id, event.actor, payload.get("stage"))
+            done = int(payload.get("done") or 0)
+            if (event.ts or 0) >= day_start:
+                pieces_today[event.order_id] = pieces_today.get(event.order_id, 0) + max(0, done - previous_done.get(key, 0))
+            previous_done[key] = done
+
+        buyers = {u.id: u.name for u in s.scalars(select(db.User).where(db.User.id.in_({o.buyer_id for o in orders})))} if orders else {}
+        rows, queue = [], []
+        active_statuses = {"submitted", "quoted", "accepted", "planned", "in_production", "payout_pending", "settled", "ready_for_delivery", "dispatched", "partially_delivered", "blocked"}
+        queue_status = {"submitted": ("Send quote", "quote"), "planned": ("Approve and start plan", "start"),
+                        "payout_pending": ("Review payout approvals", "payout")}
+        for o in orders:
+            v = _view(s, o, user)
+            quality_waiting = [q for q in v.get("quality", []) if q.get("status") == "pending"]
+            disputes = [d for d in v.get("disputes", []) if d.get("open")]
+            declined = v.get("declined", [])
+            needs_leader = o.status in queue_status or bool(quality_waiting or disputes or (declined and o.status == "planned"))
+            v["buyer_name"] = buyers.get(o.buyer_id, (v.get("order") or {}).get("buyer_name", "Buyer"))
+            v["last_reported_at"] = latest_report.get(o.id)
+            v["started_at"] = started_at.get(o.id)
+            v["needs_leader"] = needs_leader
+            v["health"] = order_health(v, now)
+            v["pieces_finished_today"] = pieces_today.get(o.id, 0)
+            assignments = (v.get("plan") or {}).get("assignments", [])
+            by_stage = {}
+            for assignment in assignments:
+                stage = assignment["stage"]
+                entry = by_stage.setdefault(stage, {"name": stage, "done": 0, "units": 0})
+                entry["done"] += assignment.get("done", 0)
+                entry["units"] += assignment.get("units", 0)
+            v["stages"] = [{**stage, "pct": int(stage["done"] * 100 / stage["units"]) if stage["units"] else 0} for stage in by_stage.values()]
+            rows.append(v)
+            if o.status in queue_status:
+                label, action = queue_status[o.status]
+                queue.append({"order_id": o.id, "kind": o.status, "label": label, "action": action})
+            queue.extend({"order_id": o.id, "kind": "sample", "label": f"Review {q.get('name', 'member')}'s sample", "action": "quality"}
+                         for q in quality_waiting)
+            queue.extend({"order_id": o.id, "kind": "dispute", "label": f"Resolve pay dispute from {d.get('name', 'member')}", "action": "payout"}
+                         for d in disputes)
+            if declined and o.status == "planned":
+                queue.append({"order_id": o.id, "kind": "declined", "label": "Replan after a task decline", "action": "replan"})
+            if o.status == "blocked":
+                queue.append({"order_id": o.id, "kind": "blocked", "label": "Unblock or review blocked delivery", "action": "delivery"})
+        proposed = list(s.scalars(select(db.RateCard).where(db.RateCard.group_id == user["group_id"], db.RateCard.status == "proposed")))
+        queue.extend({"order_id": None, "ratecard_id": card.id, "kind": "ratecard", "label": f"Rate-card vote needed: {card.product} v{card.version}", "action": "pricing"} for card in proposed)
+        active_orders = [o for o in orders if o.status in active_statuses]
+        group_name = group.name if group else ""
+        activity = [{"seq": event.i, "type": event.type, "order_id": event.order_id,
+                     "summary": event.type.replace(".", " ").replace("_", " ").capitalize(),
+                     "ts": event.ts} for event in events[-8:]]
+        response = {"group": group_name, "kpis": {
+                    "active_orders": len(active_orders),
+                    "pieces_finished_today": sum(pieces_today.values()),
+                    "orders_on_track": sum(1 for o in rows if o["status"] in active_statuses and o["health"] == "On track"),
+                    "waiting_for_leader": len(queue),
+                    "payout_waiting": sum(o.status == "payout_pending" for o in active_orders)},
+                "decision_queue": queue[:5], "decision_count": len(queue), "orders": rows,
+                "activity": activity, "updated_at": now, "last_seq": -1 if latest_seq is None else latest_seq}
+        if summary_only:
+            response.pop("orders")
+        return response
+
+def leader_order_detail(user, oid):
+    _leader_only(user)
+    with db.S() as s:
+        o = _order(s, oid, user)
+        v = _view(s, o, user)
+        buyer = s.get(db.User, o.buyer_id)
+        v["buyer_name"] = buyer.name if buyer else (v.get("order") or {}).get("buyer_name", "Buyer")
+        latest_report = s.scalars(select(db.LedgerEvent).where(
+            db.LedgerEvent.order_id == o.id, db.LedgerEvent.type == "progress.reported"
+        ).order_by(db.LedgerEvent.i.desc())).first()
+        started = s.scalars(select(db.LedgerEvent).where(
+            db.LedgerEvent.order_id == o.id, db.LedgerEvent.type == "production.started"
+        ).order_by(db.LedgerEvent.i.desc())).first()
+        v["last_reported_at"] = latest_report.ts if latest_report else None
+        v["started_at"] = started.ts if started else None
+        v["needs_leader"] = (o.status in ("submitted", "planned", "payout_pending")
+                             or any(q.get("status") == "pending" for q in v.get("quality", []))
+                             or any(d.get("open") for d in v.get("disputes", [])))
+        v["health"] = order_health(v)
+        by_stage = {}
+        for assignment in (v.get("progress") or {}).get("rows", []):
+            entry = by_stage.setdefault(assignment["stage"], {"name": assignment["stage"], "done": 0, "units": 0})
+            entry["done"] += assignment["done"]
+            entry["units"] += assignment["units"]
+        v["stages"] = [{**stage, "pct": int(stage["done"] * 100 / stage["units"]) if stage["units"] else 0}
+                       for stage in by_stage.values()]
+        return v
 
 # ---- buyer ----
 def groups():

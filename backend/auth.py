@@ -29,6 +29,15 @@ def read_token(tok):
     except Exception:
         return None
 
+def token_expiry(tok):
+    """Return a signed session token's expiry after validating its signature."""
+    try:
+        b, sig = tok.rsplit(".", 1)
+        if not hmac.compare_digest(sig, _sig(b.encode())): return None
+        return int(json.loads(base64.urlsafe_b64decode(b))["e"])
+    except Exception:
+        return None
+
 def request_otp(phone):
     phone, now = norm(phone), time.time()
     with db.S() as s:
@@ -72,4 +81,3 @@ def require(*roles):
         if roles and u["role"] not in roles: raise HTTPException(403, "Not allowed for your role")
         return u
     return dep
-

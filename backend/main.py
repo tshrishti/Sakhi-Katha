@@ -1,11 +1,11 @@
 import envload  # noqa: F401  (loads .env before anything reads the environment)
-import asyncio, base64, contextlib, csv, hmac, io, logging, os, pathlib
+import asyncio, base64, contextlib, csv, hmac, io, json, logging, os, pathlib, threading, time
 from xml.sax.saxutils import escape
-from sqlalchemy import select
+from sqlalchemy import func, select
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-import auth, bootstrap, bot, db, media as mediafetch, svc, voice
+import auth, bootstrap, bot, db, events, media as mediafetch, svc, voice
 
 log = logging.getLogger("sakhi")
 DEV = auth.DEV
@@ -34,12 +34,30 @@ async def lifespan(app):
 
 app = FastAPI(title="Sakhi Khata", lifespan=lifespan, docs_url="/docs" if DEV else None, redoc_url=None, openapi_url="/openapi.json" if DEV else None)
 HOME = {"buyer": "/app/buyer.html", "seller": "/app/seller.html", "leader": "/app/leader.html", "officer": "/app/officer.html"}
+_stream_lock = threading.Lock()
+_stream_users = {}
+
+def _ledger_batch(cursor, limit):
+    stmt = (select(db.LedgerEvent, db.Order)
+            .outerjoin(db.Order, db.Order.id == db.LedgerEvent.order_id)
+            .where(db.LedgerEvent.i > cursor)
+            .order_by(db.LedgerEvent.i)
+            .limit(limit))
+    with db.S() as s:
+        return list(s.execute(stmt).all())
+
+def _sse(message, event_id=None, event_name="change"):
+    lines = []
+    if event_id is not None: lines.append(f"id: {event_id}")
+    lines.extend((f"event: {event_name}", "data: " + json.dumps(message, ensure_ascii=False, separators=(",", ":")), ""))
+    return "\n".join(lines) + "\n"
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     r = await call_next(request)
     r.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"})
-    if request.url.path.startswith("/api"): r.headers["Cache-Control"] = "no-store"
+    if request.url.path == "/api/stream": r.headers["Cache-Control"] = "no-cache"
+    elif request.url.path.startswith("/api"): r.headers["Cache-Control"] = "no-store"
     return r
 @app.exception_handler(svc.Err)
 async def svc_err(request, e): return JSONResponse({"detail": e.msg}, status_code=e.code)
@@ -79,6 +97,79 @@ def set_lang(b: dict, u=Depends(auth.require())):
 @app.post("/api/me/consent")
 def consent(u=Depends(auth.require())): return svc.consent(u)
 
+# ---- live dashboard events ----
+@app.get("/api/stream")
+async def stream(request: Request):
+    if os.getenv("STREAM_ENABLED", "1") != "1":
+        raise HTTPException(503, "Live updates are temporarily unavailable")
+    user = auth.current_user(request)
+    if not user: raise HTTPException(401, "Please log in")
+    token = request.cookies.get("sk", "")
+    expires = auth.token_expiry(token)
+    if expires is None: raise HTTPException(401, "Please log in")
+    limit = max(1, int(os.getenv("STREAM_MAX_PER_USER", "3")))
+    with _stream_lock:
+        current = _stream_users.get(user["id"], 0)
+        if current >= limit: raise HTTPException(429, "Too many live dashboard connections")
+        _stream_users[user["id"]] = current + 1
+    try:
+        raw_cursor = request.headers.get("last-event-id") or request.query_params.get("since")
+        if raw_cursor is None:
+            with db.S() as s:
+                latest = s.scalar(select(func.max(db.LedgerEvent.i)))
+                cursor = -1 if latest is None else latest
+        else:
+            try: cursor = max(-1, int(raw_cursor))
+            except ValueError: raise HTTPException(400, "Invalid event cursor")
+    except Exception:
+        with _stream_lock:
+            _stream_users[user["id"]] = max(0, _stream_users.get(user["id"], 1) - 1)
+        raise
+
+    async def updates():
+        last_heartbeat, last_metrics = time.monotonic(), 0
+        try:
+            yield "retry: 3000\n\n"
+            replay = _ledger_batch(cursor, 201)
+            current_cursor = cursor
+            if len(replay) > 200:
+                yield _sse({"type": "resync"}, event_name="change")
+                return
+            projected = events.project_joined([(row, order) for row, order in replay], user)
+            for message in projected:
+                if user["role"] == "officer":
+                    if time.monotonic() - last_metrics < 10: continue
+                    last_metrics = time.monotonic()
+                yield _sse(message, message["seq"])
+            if replay: current_cursor = replay[-1][0].i
+            interval = max(0.25, int(os.getenv("STREAM_POLL_MS", "1000")) / 1000)
+            while time.time() < expires:
+                if await request.is_disconnected(): return
+                batch = _ledger_batch(current_cursor, 201)
+                if len(batch) > 200:
+                    yield _sse({"type": "resync"}, event_name="change")
+                    return
+                for row, order in batch:
+                    current_cursor = row.i
+                    message = events.project_joined([(row, order)], user)
+                    if message:
+                        if user["role"] == "officer":
+                            if time.monotonic() - last_metrics < 10: continue
+                            last_metrics = time.monotonic()
+                        yield _sse(message[0], row.i)
+                if time.monotonic() - last_heartbeat >= 15:
+                    yield ": heartbeat\n\n"
+                    last_heartbeat = time.monotonic()
+                await asyncio.sleep(interval)
+        finally:
+            with _stream_lock:
+                remaining = _stream_users.get(user["id"], 1) - 1
+                if remaining > 0: _stream_users[user["id"]] = remaining
+                else: _stream_users.pop(user["id"], None)
+
+    return StreamingResponse(updates(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 # ---- buyer ----
 B = Depends(auth.require("buyer"))
 @app.get("/api/products")
@@ -103,6 +194,10 @@ def b_dphoto(oid: int, i: int, u=B): return _img(svc.delivery_photo_get(u, oid, 
 L = Depends(auth.require("leader"))
 @app.get("/api/leader/orders")
 def l_orders(u=L): return svc.my_orders(u)
+@app.get("/api/leader/overview")
+def l_overview(summary: bool = False, u=L): return svc.leader_overview(u, summary_only=summary)
+@app.get("/api/leader/orders/{oid}")
+def l_order_detail(oid: int, u=L): return svc.leader_order_detail(u, oid)
 @app.post("/api/leader/orders/{oid}/quote")
 def l_quote(oid: int, b: dict, u=L): return svc.quote(u, oid, b.get("counter"))
 @app.post("/api/leader/orders/{oid}/plan")
