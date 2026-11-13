@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Buyer - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=phase2"></head><body><main id="m"></main><div id="toast"></div>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Buyer - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=desktop"></head><body><main id="m"></main><div id="toast"></div>
 <script src="common.js"></script><script>
 async function load(){const [gs,os]=await Promise.all([api('/buyer/groups'),api('/buyer/orders')]);
  $('#m').innerHTML=`<div class="card"><h2>Place an order</h2><div class="row"><select id="g">${gs.map(g=>`<option value="${g.id}">${esc(g.name)} - ${esc(g.village)} (${g.orders_delivered} orders delivered)</option>`).join('')}</select></div>

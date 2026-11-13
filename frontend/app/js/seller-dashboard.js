@@ -57,6 +57,10 @@ function renderMemberTab(view = SakhiTabs.current('home')) {
   if (!memberData) return;
   const tabs = [...document.querySelectorAll('#member-dashboard [role="tab"]')];
   const selected = ['home', 'tasks', 'earnings'].includes(view.tab) ? view.tab : 'home';
+  const panel = document.getElementById('member-panel');
+  panel.classList.toggle('member-home-panel', selected === 'home');
+  panel.classList.toggle('member-tasks-panel', selected === 'tasks');
+  panel.classList.toggle('member-earnings-panel', selected === 'earnings');
   tabs.forEach(tab => {
     const active = tab.dataset.tab === selected;
     tab.setAttribute('aria-selected', String(active));

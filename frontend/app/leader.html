@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Leader - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=phase2"></head><body><main id="m"></main><div id="toast"></div>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Leader - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=desktop"></head><body><main id="m"></main><div id="toast"></div>
 <script src="common.js"></script><script src="js/tabs.js"></script><script src="js/live.js"></script><script>
 const RES={possible_defect:'Possible defect',met:'Looks OK',cannot_tell:'Cannot tell from photo'};
 const ai=(q,oid,i)=>{const s=q.screening;if(!s)return '';
@@ -129,6 +129,7 @@ function renderTab(view){
  const tabs=[...$('#leader-dashboard').querySelectorAll('[role="tab"]')];
  const tab=tabs.some(x=>x.dataset.tab===view.tab)?view.tab:'overview';
  tabs.forEach(button=>{const active=button.dataset.tab===tab;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;});
+ $('#tab-panel').classList.toggle('overview-panel',tab==='overview');
  const orders=overviewData.orders;
  const qualityWaiting=orders.reduce((sum,o)=>sum+(o.quality||[]).filter(q=>q.status==='pending').length,0);
  setLeaderBadge('team-badge',teamData.filter(member=>member.status==='Behind').length);
