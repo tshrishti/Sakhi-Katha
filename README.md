@@ -18,7 +18,9 @@ The default database is local SQLite. For a persistent deployment, configure `DA
 
 ## Dashboards
 
-The current leader dashboard has an Overview and Orders tab, a role-scoped decision queue, deadline/health indicators, order details, and ledger-backed server-sent updates with a polling fallback. Member, buyer, and government dashboards retain their existing workflows; their tabbed/live upgrades are planned in later dashboard phases.
+The root URL now opens the real sign-in flow; it no longer serves the disconnected mock dashboard. The role-based dashboards use the same backend and database as WhatsApp.
+
+The leader dashboard has Overview, Orders, Team, Quality, Delivery, Payouts, and Pricing tabs, with role-scoped data and ledger-backed live updates. The member dashboard has Home, My tasks, and Earnings tabs, with private work/pay data, task and issue actions, and live updates. Buyer and government dashboard upgrades, messaging/leave flows, and remaining account/profile features are planned for later phases.
 
 The pre-change architecture and verified behavior are in [docs/DASHBOARDS_CURRENT.md](docs/DASHBOARDS_CURRENT.md). The WhatsApp chatbot baseline is in [docs/CHATBOT_CURRENT.md](docs/CHATBOT_CURRENT.md).
 

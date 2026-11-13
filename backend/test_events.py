@@ -135,3 +135,57 @@ def test_stream_replays_only_scoped_changes(world):
     assert leader_headers["x-accel-buffering"] == "no"
     assert f"id: {seq}" in leader_body and f"Order #{order_id}" in leader_body
     assert f"id: {seq}" not in outsider_body
+
+
+def test_member_home_and_leader_team_share_dashboard_and_whatsapp_updates(world):
+    import bot
+
+    buyer, leader, member = (
+        world.login("+919000000002"),
+        world.login("+919000000001"),
+        world.login("+919000000100"),
+    )
+    group_id = buyer.get("/api/buyer/groups").json()[0]["id"]
+    order_id = buyer.post("/api/buyer/orders", json={
+        "group_id": group_id, "text": fixtures.DATA["order_text"]
+    }).json()["id"]
+    leader.post(f"/api/leader/orders/{order_id}/quote", json={})
+    buyer.post(f"/api/buyer/orders/{order_id}/accept")
+    leader.post(f"/api/leader/orders/{order_id}/plan")
+    leader.post(f"/api/leader/orders/{order_id}/start")
+
+    message = bot.handle("whatsapp:+919000000100", f"DONE {order_id} 3")
+    assert "Recorded" in message
+    with db.S() as session:
+        assert session.query(db.User).filter_by(phone="+919000000100").one().last_active_at is not None
+    assert member.post(f"/api/seller/orders/{order_id}/done", json={"n": 2, "stage": "packing"}).status_code == 403
+    member.post(f"/api/seller/orders/{order_id}/done", json={"n": 2, "stage": "cutting"})
+
+    home = member.get("/api/seller/home")
+    assert home.status_code == 200
+    body = home.json()
+    task = next(item for item in body["tasks"] if item["order_id"] == order_id)
+    assert task["done"] == 5
+    assert body["pieces_this_week"] == 5
+    assert "pay" not in task and task["name"] == "Shobha"
+    assert all(entry["line"]["member"] == member.get("/api/me").json()["id"] for entry in body["earnings"])
+    with db.S() as session:
+        assert session.get(db.User, member.get("/api/me").json()["id"]).last_active_at is not None
+
+    team = leader.get("/api/leader/team")
+    assert team.status_code == 200
+    worker = next(item for item in team.json() if item["name"] == "Shobha")
+    assert any(item["order_id"] == order_id and item["done"] == 5 for item in worker["tasks"])
+    overview = leader.get("/api/leader/overview").json()
+    assert next(stage for stage in overview["orders"][0]["stages"] if stage["name"] == "cutting")["done"] == 5
+    assert all("pay" not in item and "earnings" not in item for item in team.json())
+    assert member.get("/api/leader/team").status_code == 403
+
+    with db.S() as session:
+        rows = session.query(db.LedgerEvent).filter_by(order_id=order_id, type="progress.reported").order_by(db.LedgerEvent.i).all()
+        order = session.get(db.Order, order_id)
+        member_user = member.get("/api/me").json()
+        projected = [events.project(row, member_user, order) for row in rows]
+        assert len(projected) == 2
+        assert all(event and event["refresh"] == ["tasks", "earnings"] for event in projected)
+        assert all("payload" not in event and "actor" not in event for event in projected)

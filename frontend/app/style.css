@@ -1,8 +1,8 @@
-@import url("css/tokens.css");
-@import url("css/base.css");
-@import url("css/components.css");
+@import url("css/tokens.css?v=phase2");
+@import url("css/base.css?v=phase2");
+@import url("css/components.css?v=phase2");
 
-.ai { margin: 8px 0; padding: 8px 12px; border-left: 3px solid #c18b26; border-radius: 0 8px 8px 0; background: #faf6ea; }
+.ai { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--warn-text); border-radius: 0 8px 8px 0; background: #1d2948; color: var(--text); }
 .ai ul { margin: 4px 0; padding-left: 18px; }
 .conf { padding: 2px 8px; border-radius: 999px; background: var(--neutral-bg); color: var(--neutral-text); font-size: 12px; }
 .conf.high { background: var(--error-bg); color: var(--error-text); }

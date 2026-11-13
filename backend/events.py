@@ -37,7 +37,7 @@ def _order_for(event, order):
         return s.get(db.Order, order_id)
 
 def _refresh(type_):
-    if type_.startswith(("progress.", "quality.", "plan.", "production.")):
+    if type_.startswith(("progress.", "quality.", "plan.", "production.", "task.", "member.")):
         return ["orders", "team", "activity"]
     if type_.startswith(("payout.", "dispute.")):
         return ["orders", "payouts", "activity"]

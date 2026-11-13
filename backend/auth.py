@@ -72,6 +72,10 @@ def current_user(request: Request):
     with db.S() as s:
         u = s.get(db.User, uid)
         if not u or not u.active: return None
+        now = time.time()
+        if not u.last_active_at or now - u.last_active_at >= 30:
+            u.last_active_at = now
+            s.commit()
         return {"id": u.id, "name": u.name, "role": u.role, "group_id": u.group_id, "phone": u.phone, "consented": bool(u.consent_at)}
 
 def require(*roles):

@@ -24,6 +24,7 @@ class User(Base):                      # role: buyer | seller (SHG member) | lea
     skills = Column(JSON, default=list); capacity = Column(Integer, default=0)
     active = Column(Boolean, default=True); consent_at = Column(Float); lang = Column(String, default="en")
     preferred_group_id = Column(Integer)
+    last_active_at = Column(Float)
 
 class Order(Base):
     __tablename__ = "orders"
@@ -100,4 +101,6 @@ def ensure_columns():
             with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN lang VARCHAR DEFAULT 'en'"))
         if "preferred_group_id" not in user_columns:
             with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN preferred_group_id INTEGER"))
+        if "last_active_at" not in user_columns:
+            with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN last_active_at FLOAT"))
     except Exception: pass

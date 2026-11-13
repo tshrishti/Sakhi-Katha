@@ -1,14 +1,69 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sakhi Khata - Dashboards</title><link rel="stylesheet" href="style.css">
-<style>.top{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}</style></head><body>
-<main style="max-width:520px;margin-top:6vh"><div class="card">
-<h2>SAKHI KHATA</h2>
-<p>Log in with your registered WhatsApp number. You will see the dashboard for your role.</p>
-<p class="muted">A one-time code is sent to you on WhatsApp. If it does not arrive, send "hi" to the Sakhi Khata WhatsApp number first and try again.</p>
-<div class="row"><input id="ph" placeholder="Phone, e.g. 9876543210" inputmode="tel"><button id="go">Send code</button></div>
-<div class="row" id="c2" style="display:none"><input id="code" placeholder="6-digit code" inputmode="numeric" maxlength="6"><button id="ok">Log in</button></div>
-<p class="muted" id="dev"></p>
-<div class="top"><a class="btn" href="/">What is Sakhi Khata?</a></div>
-</div></main><div id="toast"></div><script src="common.js"></script><script>
-$('#go').onclick=async()=>{try{const r=await api('/auth/request-otp','POST',{phone:$('#ph').value});$('#c2').style.display='flex';toast('If this number is registered, a code was sent on WhatsApp.');if(r.dev_code)$('#dev').textContent='DEV MODE code: '+r.dev_code}catch(e){toast(e.message,1)}};
-$('#ok').onclick=async()=>{try{const r=await api('/auth/verify','POST',{phone:$('#ph').value,code:$('#code').value});location=r.home}catch(e){toast(e.message,1)}};
-</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in - Sakhi Khata</title>
+  <link rel="stylesheet" href="style.css?v=phase2">
+</head>
+<body>
+  <main class="login-layout">
+    <section class="login-intro" aria-label="About the dashboards">
+      <a class="login-brand" href="/">Sakhi Khata</a>
+      <h1 class="login-title">Every order, every hand, every rupee explained.</h1>
+      <p class="muted">Sign in to your own live dashboard. What you can see depends on your role.</p>
+      <div class="login-roles">
+        <article class="login-role"><b>Group leader</b><p>Review orders, share work fairly, check quality and approve payouts.</p></article>
+        <article class="login-role"><b>Member</b><p>See your own tasks and earnings. Accept or decline work and report progress.</p></article>
+        <article class="login-role"><b>Buyer</b><p>Place orders and follow their progress through delivery.</p></article>
+        <article class="login-role"><b>Mission officer</b><p>See group-level totals and escalations, never personal earnings.</p></article>
+      </div>
+    </section>
+    <section class="login-card" aria-labelledby="login-title">
+      <h2 id="login-title">Sign in</h2>
+      <p class="muted">Use your registered phone number. We will send a one-time code on WhatsApp.</p>
+      <form id="request-form">
+        <label class="field" for="ph">Phone number
+          <input id="ph" name="phone" placeholder="e.g. 9876543210" inputmode="tel" autocomplete="tel" required>
+        </label>
+        <button id="go" type="submit">Send sign-in code</button>
+      </form>
+      <form id="verify-form" hidden>
+        <label class="field" for="code">6-digit code
+          <input id="code" name="code" placeholder="Enter your code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+        </label>
+        <button type="submit">Continue to my dashboard</button>
+      </form>
+      <p id="login-message" class="login-help" role="status" aria-live="polite"></p>
+      <p id="dev" class="login-help"></p>
+      <p class="login-help">Your role is matched to your account after sign-in. This page uses live account data.</p>
+      <a class="btn secondary" href="/landing.html">What is Sakhi Khata?</a>
+    </section>
+  </main>
+  <div id="toast" role="status"></div>
+  <script src="common.js"></script>
+  <script>
+    $('#request-form').onsubmit = async event => {
+      event.preventDefault();
+      try {
+        const result = await api('/auth/request-otp', 'POST', {phone: $('#ph').value});
+        $('#verify-form').hidden = false;
+        $('#login-message').textContent = 'If this number is registered, a code has been sent to you on WhatsApp.';
+        if (result.dev_code) $('#dev').textContent = 'Development code: ' + result.dev_code;
+        $('#code').focus();
+      } catch (error) {
+        toast(error.message, 1);
+      }
+    };
+    $('#verify-form').onsubmit = async event => {
+      event.preventDefault();
+      try {
+        const result = await api('/auth/verify', 'POST', {phone: $('#ph').value, code: $('#code').value});
+        location.href = result.home;
+      } catch (error) {
+        toast(error.message, 1);
+      }
+    };
+  </script>
+</body>
+</html>

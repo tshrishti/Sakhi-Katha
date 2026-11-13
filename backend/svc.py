@@ -138,7 +138,7 @@ def leader_overview(user, now=None, summary_only=False):
             v["needs_leader"] = needs_leader
             v["health"] = order_health(v, now)
             v["pieces_finished_today"] = pieces_today.get(o.id, 0)
-            assignments = (v.get("plan") or {}).get("assignments", [])
+            assignments = (v.get("progress") or {}).get("rows", [])
             by_stage = {}
             for assignment in assignments:
                 stage = assignment["stage"]
@@ -204,6 +204,56 @@ def leader_order_detail(user, oid):
         v["stages"] = [{**stage, "pct": int(stage["done"] * 100 / stage["units"]) if stage["units"] else 0}
                        for stage in by_stage.values()]
         return v
+
+def leader_team(user, now=None):
+    """Return group-scoped workload and availability without exposing individual pay."""
+    _leader_only(user)
+    now = time.time() if now is None else now
+    tolerance = max(0, int(os.getenv("BEHIND_TOLERANCE_PCT", "15"))) / 100
+    with db.S() as s:
+        members = list(s.scalars(select(db.User).where(
+            db.User.group_id == user["group_id"], db.User.role == "seller", db.User.active == True
+        )).all())  # noqa: E712
+        orders = list(s.scalars(select(db.Order).where(
+            db.Order.group_id == user["group_id"],
+            db.Order.status.in_(("planned", "in_production"))
+        )).all())
+        member_rows = {m.id: {"id": m.id, "name": m.name, "skills": m.skills or [],
+                              "capacity": m.capacity or 0, "last_active_at": m.last_active_at,
+                              "tasks": [], "status": "Idle"} for m in members}
+        order_ids = [o.id for o in orders]
+        reports = list(s.scalars(select(db.LedgerEvent).where(
+            db.LedgerEvent.order_id.in_(order_ids), db.LedgerEvent.type == "progress.reported"
+        ).order_by(db.LedgerEvent.i.desc())).all()) if order_ids else []
+        latest_report = {}
+        for event in reports:
+            latest_report.setdefault((event.order_id, event.actor), event.ts)
+        starts = {}
+        for event in s.scalars(select(db.LedgerEvent).where(
+            db.LedgerEvent.order_id.in_(order_ids), db.LedgerEvent.type == "production.started"
+        ).order_by(db.LedgerEvent.i)).all() if order_ids else []:
+            starts.setdefault(event.order_id, event.ts)
+
+        for order in orders:
+            for assignment in (order.data.get("plan") or {}).get("assignments", []):
+                row = member_rows.get(assignment["member"])
+                if row is None:
+                    continue
+                done = min(int((order.data.get("progress") or {}).get(_key(assignment), 0)), assignment["units"])
+                due_at = order.data.get("due_at")
+                started_at = starts.get(order.id)
+                elapsed = (now - started_at) / (due_at - started_at) if started_at and due_at and due_at > started_at else 0
+                pace = (done / assignment["units"]) if assignment["units"] else 1
+                behind = order.status == "in_production" and pace + tolerance < min(max(elapsed, 0), 1)
+                row["tasks"].append({"order_id": order.id, "stage": assignment["stage"],
+                                     "units": assignment["units"], "done": done,
+                                     "due_at": due_at, "status": order.status,
+                                     "work_status": "Behind" if behind else "Working",
+                                     "last_reported_at": latest_report.get((order.id, f"seller:{assignment['member']}"))})
+        for row in member_rows.values():
+            if row["tasks"]:
+                row["status"] = "Behind" if any(t["work_status"] == "Behind" for t in row["tasks"]) else "Working"
+        return list(member_rows.values())
 
 # ---- buyer ----
 def groups():
@@ -372,8 +422,24 @@ def tasks(user):
     with db.S() as s:
         out = []
         for o in s.scalars(select(db.Order).where(db.Order.group_id == user["group_id"]).order_by(db.Order.id.desc())):
-            for x in (o.data.get("plan") or {}).get("assignments", []):
+            assignments = (o.data.get("plan") or {}).get("assignments", [])
+            stage_progress = {}
+            for assignment in assignments:
+                stage = assignment["stage"]
+                progress = stage_progress.setdefault(stage, {"name": stage, "units": 0, "done": 0})
+                progress["units"] += assignment["units"]
+                progress["done"] += min(int((o.data.get("progress") or {}).get(_key(assignment), 0)), assignment["units"])
+            journey = [{**stage, "pct": int(100 * stage["done"] / stage["units"]) if stage["units"] else 0}
+                       for stage in stage_progress.values()]
+            for x in assignments:
                 if x["member"] == user["id"]: out.append({"order_id": o.id, "status": o.status, **x, "accepted": user["id"] in o.data.get("task_accepted", []), "done": min(int(o.data.get("progress", {}).get(_key(x), 0)), x["units"]),
+                                "product": (o.data.get("rate_card") or {}).get("product", defaults.DEFAULT_PRODUCT),
+                                "quantity": o.data["order"]["qty"], "due_at": o.data.get("due_at"),
+                                "days_left": _days_left(o), "journey": journey,
+                                "quality": next(({"status": q["status"], "reason": q.get("reason", ""),
+                                                  "rework": q.get("rework", 0), "ts": q.get("ts")}
+                                                 for q in reversed(o.data.get("quality", []))
+                                                 if q.get("member") == user["id"] and q.get("stage") == x["stage"]), None),
                                 "checklist": [c["text"] for c in _checklist(o)] if o.status == "in_production" else []})
         return out
 def earnings(user):
@@ -382,8 +448,62 @@ def earnings(user):
         for o in s.scalars(select(db.Order).where(db.Order.group_id == user["group_id"]).order_by(db.Order.id.desc())):
             for l in _lines(o):
                 if l["member"] == user["id"]:
-                    out.append({"order_id": o.id, "status": o.status, "line": l, "explain": i18n.explain(l, lang), "approved_by_me": user["id"] in o.data["approvals"]["members"]})
+                    disputes = [{"open": d["open"], "reason": d["reason"], "note": d.get("note", ""),
+                                "ts": d.get("ts")} for d in o.data.get("disputes", []) if d.get("uid") == user["id"]]
+                    out.append({"order_id": o.id, "status": o.status, "line": l, "explain": i18n.explain(l, lang),
+                                "approved_by_me": user["id"] in o.data["approvals"]["members"],
+                                "leader_approved": bool(o.data["approvals"]["leader"]),
+                                "disputes": disputes})
         return out
+
+def seller_home(user, now=None):
+    """Build the member's private live summary from her own tasks, pay lines and ledger events."""
+    if user["role"] != "seller": raise Err(403, "Only a member can view this dashboard")
+    now = time.time() if now is None else now
+    mine, pays = tasks(user), earnings(user)
+    week_start = now - 7 * 86400
+    with db.S() as s:
+        profile = s.get(db.User, user["id"])
+        leaders = list(s.scalars(select(db.User).where(
+            db.User.group_id == user["group_id"], db.User.role == "leader", db.User.active == True
+        )).all())  # noqa: E712
+        orders = list(s.scalars(select(db.Order).where(db.Order.group_id == user["group_id"])).all())
+        order_ids = [o.id for o in orders]
+        logs = list(s.scalars(select(db.LedgerEvent).where(
+            db.LedgerEvent.order_id.in_(order_ids), db.LedgerEvent.actor == f"seller:{user['id']}"
+        ).order_by(db.LedgerEvent.i)).all()) if order_ids else []
+        recent_events = list(s.scalars(select(db.LedgerEvent).where(
+            db.LedgerEvent.order_id.in_(order_ids)
+        ).order_by(db.LedgerEvent.i.desc()).limit(200)).all()) if order_ids else []
+        latest_seq = s.scalar(select(func.max(db.LedgerEvent.i)))
+        previous = {}
+        pieces_this_week = 0
+        for event in logs:
+            if event.type != "progress.reported":
+                continue
+            payload = event.payload or {}
+            key = (event.order_id, payload.get("stage"))
+            done = int(payload.get("done") or 0)
+            if (event.ts or 0) >= week_start:
+                pieces_this_week += max(0, done - previous.get(key, 0))
+            previous[key] = done
+        import events as event_projection
+        latest = []
+        orders_by_id = {order.id: order for order in orders}
+        for event in recent_events:
+            message = event_projection.project(event, user, orders_by_id.get(event.order_id))
+            if message:
+                latest.append(message)
+            if len(latest) == 3:
+                break
+        return {"tasks": mine, "earnings": pays,
+                "profile": {"name": profile.name, "skills": profile.skills or [], "capacity": profile.capacity or 0,
+                            "language": profile.lang or "en", "consented": bool(profile.consent_at)},
+                "leader": [{"name": leader.name, "phone": leader.phone} for leader in leaders],
+                "pieces_this_week": pieces_this_week,
+                "pay_waiting": sum(float(entry["line"]["total_expected"]) for entry in pays
+                                   if entry["status"] == "payout_pending"),
+                "latest_updates": latest, "last_seq": -1 if latest_seq is None else latest_seq}
 def decline(user, oid):
     with db.S() as s:
         o = _order(s, oid, user); _need(o, "accepted", "planned")
@@ -441,7 +561,7 @@ def officer_summary(min_cell=3):
 
 
 # ---- progress, first-sample quality gate, deadline risk (the leader decides; nothing here moves money) ----
-def report_done(user, oid, n):
+def report_done(user, oid, n, stage=None):
     """Member adds pieces she finished. Cumulative; capped at her task size."""
     try: n = int(n); assert n > 0
     except Exception: raise Err(422, "Send a positive number of pieces, e.g. DONE 1 20")
@@ -449,7 +569,12 @@ def report_done(user, oid, n):
         o = _order(s, oid, user); _need(o, "in_production")
         mine = [x for x in (o.data.get("plan") or {}).get("assignments", []) if x["member"] == user["id"]]
         if not mine: raise Err(403, "You have no task in this order")
-        pr = dict(o.data.get("progress", {})); x = next((x for x in mine if pr.get(_key(x), 0) < x["units"]), mine[-1])
+        pr = dict(o.data.get("progress", {}))
+        if stage is not None:
+            x = next((x for x in mine if x["stage"] == str(stage)), None)
+            if x is None: raise Err(403, "You have no task for that stage")
+        else:
+            x = next((x for x in mine if pr.get(_key(x), 0) < x["units"]), mine[-1])
         pr[_key(x)] = min(x["units"], pr.get(_key(x), 0) + n)
         _set(o, progress=pr); _log(s, o, "progress.reported", user, {"stage": x["stage"], "done": pr[_key(x)], "of": x["units"]}); s.commit()
         if pr[_key(x)] >= x["units"]: _tell(s, o.group_id, "leader", f"{user['name']} finished {x['stage']} x{x['units']} for order #{o.id}.")

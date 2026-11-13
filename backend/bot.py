@@ -1,6 +1,7 @@
 """WhatsApp commands for buyers, leaders and members. Same service layer and permissions as the dashboards.
 Like MaaSakhi: short messages, the number identifies the user, language is chosen on first contact, photos and voice notes work.
 Unknown numbers get nothing unless OPEN_REGISTRATION=1 (then they register themselves like in MaaSakhi); otherwise the leader adds members."""
+import time
 from sqlalchemy import select
 import auth, bootstrap, convo, db, i18n, svc
 
@@ -152,6 +153,9 @@ def handle(sender, text, msg_id=None, media=None):
     phone = auth.norm(sender)
     with db.S() as s:
         x = s.scalars(select(db.User).where(db.User.phone == phone, db.User.active == True)).first()  # noqa: E712
+        if x:
+            x.last_active_at = time.time()
+            s.commit()
         u = {"id": x.id, "name": x.name, "role": x.role, "group_id": x.group_id, "preferred_group_id": x.preferred_group_id,
              "phone": x.phone, "lang": x.lang or "en"} if x else None
     t = (text or "").strip()

@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Leader - Sakhi Khata</title><link rel="stylesheet" href="style.css"></head><body><main id="m"></main><div id="toast"></div>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Leader - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=phase2"></head><body><main id="m"></main><div id="toast"></div>
 <script src="common.js"></script><script src="js/tabs.js"></script><script src="js/live.js"></script><script>
 const RES={possible_defect:'Possible defect',met:'Looks OK',cannot_tell:'Cannot tell from photo'};
 const ai=(q,oid,i)=>{const s=q.screening;if(!s)return '';
@@ -31,7 +31,7 @@ const card=o=>{const p=o.price,pl=o.plan,po=o.payout;let a='';
  ${o.unclear.length?`<p class="warn">Check with buyer: ${o.unclear.map(esc).join('; ')}</p>`:''}
  ${p?`<p class="${p.loss_making?'bad':''}">Floor Rs ${esc(p.per_unit.floor)}/pc. At the offer, women earn Rs ${esc(p.effective_hourly_at_offer)}/hr vs target Rs ${esc(p.target_hourly)}/hr (${esc(p.pay_gap_pct)}% less). Quote: Rs ${esc(o.quote)}</p>`:''}
  ${pl&&o.status==='planned'?`<table>${pl.assignments.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.stage)} x${x.units}</td><td>Rs ${esc(x.expected_pay)}</td><td>${(o.task_accepted||[]).includes(x.member)?'<span class="ok">accepted</span>':'<span class="muted">not yet accepted</span>'}</td><td class="muted">${esc(x.why)}</td></tr>`).join('')}</table>${pl.issues.length?`<p class="warn">Risk: ${pl.issues.map(esc).join('; ')}</p>`:''}${(pl.options||[]).length?`<div class="warn"><b>Not feasible as ordered. Options:</b><ul>${pl.options.map(x=>`<li>${esc(x.label)}</li>`).join('')}</ul><span class="muted">Agree one with the buyer, then re-quote or replan.</span></div>`:''}`:''}${a}${['accepted','planned','in_production'].includes(o.status)?checklist(o):''}</div>`};
-let overviewData=null, membersData=[], rateCardsData=null, liveClient=null, tabsReady=false, orderView='list';
+let overviewData=null, teamData=[], rateCardsData=null, liveClient=null, tabsReady=false, orderView='list';
 const healthRule='Late: due date passed. Blocked: delivery is blocked. At risk: deadline check projects a shortfall. Waiting: leader action is needed. Stale: no report for 24 hours. On track: none of these.';
 function ensureShell(){
  if($('#leader-dashboard'))return;
@@ -41,9 +41,14 @@ function ensureShell(){
   <nav class="dashboard-tabs" role="tablist" aria-label="Leader dashboard">
    <button id="tab-overview" role="tab" data-tab="overview" aria-controls="tab-panel">Overview <span id="overview-badge" class="tab-badge" hidden></span></button>
    <button id="tab-orders" role="tab" data-tab="orders" aria-controls="tab-panel">Orders <span id="orders-badge" class="tab-badge" hidden></span></button>
+   <button role="tab" data-tab="team" aria-controls="tab-panel">Team <span id="team-badge" class="tab-badge" hidden></span></button>
+   <button role="tab" data-tab="quality" aria-controls="tab-panel">Quality <span id="quality-badge" class="tab-badge" hidden></span></button>
+   <button role="tab" data-tab="delivery" aria-controls="tab-panel">Delivery <span id="delivery-badge" class="tab-badge" hidden></span></button>
+   <button role="tab" data-tab="payouts" aria-controls="tab-panel">Payouts <span id="payouts-badge" class="tab-badge" hidden></span></button>
+   <button role="tab" data-tab="pricing" aria-controls="tab-panel">Pricing <span id="pricing-badge" class="tab-badge" hidden></span></button>
   </nav><section id="tab-panel" role="tabpanel" tabindex="0"></section></section>`;
  if(!tabsReady){SakhiTabs.install($('#leader-dashboard'),view=>{
-  if(view.tab==='orders'&&!rateCardsData)api('/leader/ratecards').then(d=>{rateCardsData=d;renderTab(SakhiTabs.current());}).catch(e=>toast(e.message,1));
+  if(view.tab==='pricing'&&!rateCardsData)api('/leader/ratecards').then(d=>{rateCardsData=d;renderTab(SakhiTabs.current());}).catch(e=>toast(e.message,1));
   renderTab(view);
  },'overview');tabsReady=true;}
 }
@@ -96,10 +101,7 @@ function renderOrders(d){
   <label for="due-filter">Due by</label><input id="due-filter" type="date" onchange="filterOrders()">
   <button class="secondary" id="list-view" aria-pressed="true" onclick="setOrderView('list')">List</button><button class="secondary" id="board-view" aria-pressed="false" onclick="setOrderView('board')">Board</button></div>
   <div id="orders-list" class="order-list"></div></section>
-  <section class="card"><h2>Group members</h2><table><thead><tr><th>Member</th><th>Skills</th><th>Daily capacity</th></tr></thead><tbody id="members-body"></tbody></table>
-   <div class="row"><input id="n" placeholder="Name"><input id="p" placeholder="Phone"><input id="s" placeholder="Skills: cutting, stitching"><input id="k" type="number" placeholder="Pieces/day" style="width:110px"><button onclick="addM()">Add member</button></div>
-   <button class="secondary" onclick="api('/ledger/verify').then(v=>toast(v.valid?'Ledger intact ('+v.events+' events)':'TAMPERING at event '+v.broken_at,!v.valid))">Verify audit ledger</button></section>
-  <div id="rate-card-panel"></div>`;
+  `;
  keyed($('#orders-list'),orders,'id',orderTile);
  if(priorSearch&&!$('#order-search').value)$('#order-search').value=priorSearch;
   $('#status-filter').innerHTML='<option value="">All statuses</option>'+[...new Set(orders.map(o=>o.status))].map(s=>`<option value="${esc(s)}">${esc(s.split('_').join(' '))}</option>`).join('');
@@ -108,8 +110,6 @@ function renderOrders(d){
   $('#health-filter').value=priorHealth;
   if(priorHealth&&!$('#health-filter').value)$('#health-filter').value=priorHealth;
  if(priorDue&&!$('#due-filter').value)$('#due-filter').value=priorDue;
- $('#members-body').innerHTML=membersData.map(m=>`<tr><td>${esc(m.name)}</td><td>${(m.skills||[]).map(esc).join(', ')}</td><td>${m.capacity}/day</td></tr>`).join('');
- $('#rate-card-panel').innerHTML=renderRateCards(rateCardsData);
  setOrderView(orderView);
  filterOrders();
  const drawerId=SakhiTabs.current().tab==='orders'?SakhiTabs.current().item:null;
@@ -126,10 +126,50 @@ function renderRateCards(d){
 }
 function renderTab(view){
  if(!overviewData)return;
- const tab=view.tab==='orders'?'orders':'overview';
- $('#tab-overview').setAttribute('aria-selected',String(tab==='overview'));$('#tab-overview').tabIndex=tab==='overview'?0:-1;
- $('#tab-orders').setAttribute('aria-selected',String(tab==='orders'));$('#tab-orders').tabIndex=tab==='orders'?0:-1;
- if(tab==='overview')renderOverview(overviewData);else renderOrders(overviewData);
+ const tabs=[...$('#leader-dashboard').querySelectorAll('[role="tab"]')];
+ const tab=tabs.some(x=>x.dataset.tab===view.tab)?view.tab:'overview';
+ tabs.forEach(button=>{const active=button.dataset.tab===tab;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;});
+ const orders=overviewData.orders;
+ const qualityWaiting=orders.reduce((sum,o)=>sum+(o.quality||[]).filter(q=>q.status==='pending').length,0);
+ setLeaderBadge('team-badge',teamData.filter(member=>member.status==='Behind').length);
+ setLeaderBadge('quality-badge',qualityWaiting);
+ setLeaderBadge('delivery-badge',orders.filter(o=>['settled','ready_for_delivery','dispatched','partially_delivered','blocked'].includes(o.status)).length);
+ setLeaderBadge('payouts-badge',orders.filter(o=>o.status==='payout_pending').length);
+ setLeaderBadge('pricing-badge',rateCardsData?.history.filter(card=>card.status==='proposed').length||0);
+ if(tab==='overview')renderOverview(overviewData);
+ else if(tab==='orders')renderOrders(overviewData);
+ else if(tab==='team')renderTeam();
+ else if(tab==='quality')renderQuality();
+ else if(tab==='delivery')renderDelivery();
+ else if(tab==='payouts')renderPayouts();
+ else if(tab==='pricing')renderPricing();
+}
+function setLeaderBadge(id,count){const badge=$('#'+id);badge.textContent=count||'';badge.hidden=!count;}
+function renderTeam(){
+ const rows=teamData||[];
+ $('#tab-panel').innerHTML=`<section class="card"><div class="dashboard-heading"><div><h2>Team workload</h2><p class="muted">Work status is based on member reports and declared capacity. It is not location tracking.</p></div></div>
+ <div class="order-list">${rows.map(m=>`<article class="order-tile"><div><b>${esc(m.name)}</b> <span class="chip">${esc(m.status)}</span><p>${esc((m.skills||[]).join(', ')||'No skills listed')} · ${m.capacity} pieces/day · Last active ${m.last_active_at?since(m.last_active_at):'not seen on dashboard yet'}</p>
+ ${m.tasks.length?m.tasks.map(t=>`<p>Order #${t.order_id} · ${esc(t.stage)} ${t.done}/${t.units} · Last report ${since(t.last_reported_at)} · ${esc(t.work_status)}</p>`).join(''):'<p class="muted">No active assigned work.</p>'}</div></article>`).join('')||'<p class="muted">No active members.</p>'}</div>
+ <h3>Add a member</h3><div class="row"><input id="n" placeholder="Name"><input id="p" placeholder="Phone"><input id="s" placeholder="Skills: cutting, stitching"><input id="k" type="number" placeholder="Pieces/day"><button onclick="addM()">Add member</button></div>
+ <button class="secondary" onclick="api('/ledger/verify').then(v=>toast(v.valid?'Ledger intact ('+v.events+' events)':'TAMPERING at event '+v.broken_at,!v.valid)).catch(e=>toast(e.message,1))">Verify audit ledger</button></section>`;
+}
+function renderQuality(){
+ const orders=overviewData.orders.filter(o=>(o.quality||[]).length);
+ $('#tab-panel').innerHTML=`<section class="card"><h2>Sample reviews</h2><p class="muted">AI pre-checks are suggestions only. You make every quality decision.</p>
+ ${orders.length?orders.map(o=>`<section class="card"><h3>Order #${o.id} · ${esc(o.order.product||o.product||'Order')}</h3>${(o.quality||[]).map((q,i)=>`<article class="decision-row"><span><b>${esc(q.name)}</b> · ${esc(q.stage)} · ${chip(q.status)} ${q.has_photo?`<a href="/api/leader/orders/${o.id}/quality/${i}/photo" target="_blank" rel="noopener">View photo</a>`:'No photo'}${q.reason?`<p>Rework reason: ${esc(q.reason)}</p>`:''}${q.screening?`<p>AI suggestion, you decide: ${esc(q.screening.summary||q.screening.status)}</p>`:''}</span>${q.status==='pending'?`<span><button onclick="act('/leader/orders/${o.id}/quality','POST',{member:${Number(q.member)},decision:'pass'},load)">Pass</button> <button class="red" onclick="rework(${o.id},${Number(q.member)})">Rework</button>${q.screening&&q.screening.status==='unavailable'?` <button class="secondary" onclick="act('/leader/orders/${o.id}/quality/${i}/rescreen','POST',{},load)">Try AI check again</button>`:''}</span>`:''}</article>`).join('')}</section>`).join(''):'<p class="muted">No samples have been submitted.</p>'}</section>`;
+}
+function renderDelivery(){
+ const orders=overviewData.orders.filter(o=>['settled','ready_for_delivery','dispatched','partially_delivered','blocked','closed'].includes(o.status));
+ $('#tab-panel').innerHTML=`<section class="card"><h2>Delivery</h2><p class="muted">Count the pieces before dispatch. The buyer confirms what arrived.</p>${orders.length?orders.map(o=>card(o)).join(''):'<p class="muted">No orders are in delivery yet.</p>'}</section>`;
+}
+function renderPayouts(){
+ const orders=overviewData.orders.filter(o=>o.status==='in_production'||o.status==='payout_pending'||o.status==='settled');
+ $('#tab-panel').innerHTML=`<section class="card"><h2>Payouts</h2><p class="muted">Review reported pieces and rework before proposing payment. Settlement requires member approvals and no open disputes.</p>${orders.length?orders.map(o=>card(o)).join(''):'<p class="muted">No payout is waiting for review.</p>'}</section>`;
+}
+function renderPricing(){
+ $('#tab-panel').innerHTML=`<section id="rate-card-panel"></section>`;
+ if(rateCardsData)$('#rate-card-panel').innerHTML=renderRateCards(rateCardsData);
+ else api('/leader/ratecards').then(data=>{rateCardsData=data;if(SakhiTabs.current().tab==='pricing')$('#rate-card-panel').innerHTML=renderRateCards(data);}).catch(e=>toast(e.message,1));
 }
 function filterOrders(){
  const term=($('#order-search')?.value||'').trim().toLowerCase(),status=$('#status-filter')?.value||'';
@@ -165,6 +205,7 @@ async function refreshLive(batch){
    ...ids.map(id=>api('/leader/orders/'+id))
   ]);
   overviewData={...overviewData,...summary,orders:[...overviewData.orders]};
+  if(batch.some(x=>(x.refresh||[]).includes('team')))teamData=await api('/leader/team');
   details.forEach(detail=>{
    const index=overviewData.orders.findIndex(o=>o.id===detail.id);
    if(index<0)return;
@@ -179,9 +220,9 @@ async function refreshLive(batch){
 }
 async function load(){
  try{
-  const [data,ms]=await Promise.all([api('/leader/overview'),api('/leader/members')]);
-  overviewData=data;membersData=ms;
-  if(SakhiTabs.current().tab==='orders')rateCardsData=await api('/leader/ratecards');
+  const [data,team]=await Promise.all([api('/leader/overview'),api('/leader/team')]);
+  overviewData=data;teamData=team;
+  if(SakhiTabs.current().tab==='pricing')rateCardsData=await api('/leader/ratecards');
   ensureShell();renderTab(SakhiTabs.current());
   if(!liveClient&&window.SakhiLive){
    liveClient=SakhiLive.start({scope:['orders','team','activity'],since:data.last_seq,onEvent:batch=>{

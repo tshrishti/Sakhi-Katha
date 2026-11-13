@@ -14,13 +14,14 @@ header {
   gap: 12px;
   min-height: 60px;
   padding: 10px max(16px, calc((100vw - 1180px) / 2));
-  background: var(--card);
+  background: #10172d;
   border-bottom: 1px solid var(--border);
 }
 header b, h1, h2, h3 { font-family: "Bricolage Grotesque", "Hind", system-ui, sans-serif; }
 header b { color: var(--accent); letter-spacing: .04em; }
 header span { flex: 1; }
-main { max-width: 1180px; margin: 22px auto; padding: 0 16px 90px; display: grid; gap: 16px; }
+main { max-width: 1180px; margin: 22px auto; padding: 0 16px 90px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+main > * { min-width: 0; }
 h1 { margin: 0; font-size: clamp(24px, 4vw, 34px); }
 h2 { margin: 0 0 10px; font-size: 20px; }
 h3 { margin: 16px 0 8px; }
@@ -32,7 +33,7 @@ button, .btn {
   border: 1px solid var(--accent);
   border-radius: 12px;
   background: var(--accent);
-  color: #fff;
+  color: #10162b;
   font: inherit;
   font-weight: 600;
   text-decoration: none;
@@ -51,9 +52,9 @@ input, select, textarea {
   min-height: 44px;
   max-width: 100%;
   padding: 9px 11px;
-  border: 1px solid #aeb8b3;
+  border: 1px solid #3a4976;
   border-radius: 10px;
-  background: #fff;
+  background: #0e152b;
   color: var(--text);
   font: inherit;
 }
@@ -88,11 +89,11 @@ th { color: var(--muted); font-weight: 600; }
   padding: 10px 18px;
   border: 1px solid var(--accent);
   border-radius: 12px;
-  background: var(--text);
-  color: #fff;
+  background: #10172d;
+  color: var(--text);
   display: none;
 }
-.modal { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: #10211dcc; }
+.modal { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: #050916dd; }
 .modal .card { width: min(100%, 560px); max-height: 90vh; overflow: auto; }
 @media (max-width: 640px) {
   header { gap: 8px; padding: 8px 12px; }
