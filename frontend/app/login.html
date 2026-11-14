@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Sign in - Sakhi Khata</title>
   <link rel="stylesheet" href="style.css?v=phase3b">
-  <link rel="stylesheet" href="/css/login.css?v=loom-2">
+  <link rel="stylesheet" href="/css/login.css?v=loom-3">
 </head>
 <body>
   <main class="login-layout">
@@ -23,6 +23,7 @@
     </section>
     <section class="login-card" aria-labelledby="login-title">
       <h2 id="login-title">Sign in</h2>
+      <p id="portal-note" class="portal-note" role="status" aria-live="polite" hidden></p>
       <p class="muted">Use your registered phone number. We will send a one-time code on WhatsApp.</p>
       <form id="request-form">
         <label class="field" for="ph">Phone number
@@ -45,6 +46,13 @@
   <div id="toast" role="status"></div>
   <script src="common.js?v=phase3"></script>
   <script>
+    const portals = {seller: 'SHG Member', leader: 'Group Leader', buyer: 'Buyer', officer: 'Mission Officer'};
+    const selectedPortal = portals[new URLSearchParams(location.search).get('portal')];
+    if (selectedPortal) {
+      $('#portal-note').hidden = false;
+      $('#portal-note').textContent = 'Selected portal: ' + selectedPortal + '. Your verified account role determines which dashboard opens.';
+    }
+
     $('#request-form').onsubmit = async event => {
       event.preventDefault();
       try {

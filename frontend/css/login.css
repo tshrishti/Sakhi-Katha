@@ -105,6 +105,16 @@ body {
 }
 .login-card h2 { color: #302d67; font-size: 36px; }
 .login-card .muted, .login-help { color: #71677c; font-size: 16px; }
+.portal-note:not([hidden]) {
+  margin: 0 0 14px;
+  padding: 11px 13px;
+  border: 1px solid #efdcaf;
+  border-radius: 12px;
+  background: #fff6dd;
+  color: #795629;
+  font-size: 15px;
+  font-weight: 600;
+}
 .login-card .field { gap: 8px; margin: 16px 0; font-size: 16px; font-weight: 600; }
 .login-card input {
   min-height: 54px;
