@@ -3,14 +3,148 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="refresh" content="0;url=/app/login.html?v=phase3">
-  <title>Sakhi Khata - Sign in</title>
+  <title>Sakhi Khata - fair work, clear pay</title>
+  <meta name="description" content="A simple, fair WhatsApp-first ledger for Self-Help Groups: clear orders, shared work and transparent payouts.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Mukta:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/home.css?v=portal-home-1">
 </head>
 <body>
+  <nav class="site-nav">
+    <div class="nav-inner">
+      <a class="brand" href="/" aria-label="Sakhi Khata home">Sakhi Khata</a>
+      <div class="nav-links">
+        <a href="#how">How it works</a>
+        <a href="#portals">Dashboards</a>
+        <a class="nav-cta" href="/app/login.html">Sign in <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+  </nav>
+
   <main>
-    <h1>Sakhi Khata</h1>
-    <p>Opening the secure dashboard sign-in…</p>
-    <p><a href="/app/login.html?v=phase3">Continue to sign in</a></p>
+    <header class="hero">
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <p class="eyebrow"><span aria-hidden="true">✦</span> A fairer way to work, together</p>
+          <h1>Every order.<br>Every hand.<br><em>Every rupee.</em></h1>
+          <p class="hero-description">Sakhi Khata helps Self-Help Groups turn WhatsApp orders into shared work and clear, fair pay.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#portals">Explore dashboards <span aria-hidden="true">↓</span></a>
+            <a class="button button-secondary wa" href="https://wa.me/">Chat on WhatsApp</a>
+          </div>
+          <p class="hero-note">The AI suggests. The group decides.</p>
+        </div>
+
+        <div class="hero-art">
+          <div class="art-orbit" aria-hidden="true"></div>
+          <img src="/assets/loom-scene.svg" alt="Indigo handloom cloth ripples as a rupee coin spins among ledger blocks, cloth bags and thread spools">
+          <div class="floating-note note-top"><span class="note-icon">✂</span><span><b>Work, woven fairly</b><small>Shared by skill and choice</small></span></div>
+          <div class="floating-note note-bottom"><span class="note-coin">₹</span><span><b>Clear pay slips</b><small>Every rupee explained</small></span></div>
+        </div>
+      </div>
+    </header>
+
+    <div class="trust-strip" aria-label="Sakhi Khata values">
+      <div class="trust-track">
+        <div class="trust-group">
+          <span><i>✦</i> People choose the work</span><span><i>₹</i> Pay is explained</span><span><i>⌁</i> WhatsApp first</span><span><i>♡</i> Private by role</span>
+        </div>
+        <div class="trust-group" aria-hidden="true">
+          <span><i>✦</i> People choose the work</span><span><i>₹</i> Pay is explained</span><span><i>⌁</i> WhatsApp first</span><span><i>♡</i> Private by role</span>
+        </div>
+      </div>
+    </div>
+
+    <section class="how-section" id="how">
+      <div class="section-heading">
+        <p class="eyebrow">Simple from the start</p>
+        <h2>From order to fair payout</h2>
+        <p>One clear step at a time. Your group stays in control.</p>
+      </div>
+      <ol class="process-list">
+        <li><span class="step-number">01</span><span class="step-icon" aria-hidden="true">🎙️</span><h3>Order arrives</h3><p>Send a WhatsApp text or voice note.</p></li>
+        <li><span class="step-number">02</span><span class="step-icon" aria-hidden="true">🧾</span><h3>Price made clear</h3><p>See costs, fair price and expected pay.</p></li>
+        <li><span class="step-number">03</span><span class="step-icon" aria-hidden="true">🧵</span><h3>Work shared</h3><p>Tasks fit each member’s skill and choice.</p></li>
+        <li><span class="step-number">04</span><span class="step-icon" aria-hidden="true">✨</span><h3>Group approves</h3><p>Review the work and approve each payout.</p></li>
+      </ol>
+    </section>
+
+    <section class="portals-section" id="portals">
+      <div class="section-heading">
+        <p class="eyebrow">Your work, your view</p>
+        <h2>Choose your dashboard</h2>
+        <p>Sign in securely to open the workspace for your role.</p>
+      </div>
+      <div class="portal-grid">
+        <article class="portal-card portal-member">
+          <div class="portal-icon" aria-hidden="true">🪡</div>
+          <h3>SHG Member</h3>
+          <p>Your tasks, progress and earnings.</p>
+          <a href="/app/seller.html">Member dashboard <span aria-hidden="true">→</span></a>
+        </article>
+        <article class="portal-card portal-leader">
+          <div class="portal-icon" aria-hidden="true">🤝</div>
+          <h3>Group Leader</h3>
+          <p>Orders, work plans and group approvals.</p>
+          <a href="/app/leader.html">Leader dashboard <span aria-hidden="true">→</span></a>
+        </article>
+        <article class="portal-card portal-buyer">
+          <div class="portal-icon" aria-hidden="true">📦</div>
+          <h3>Buyer</h3>
+          <p>Place orders and follow their progress.</p>
+          <a href="/app/buyer.html">Buyer dashboard <span aria-hidden="true">→</span></a>
+        </article>
+        <article class="portal-card portal-officer">
+          <div class="portal-icon" aria-hidden="true">📊</div>
+          <h3>Mission Officer</h3>
+          <p>See group-level totals and concerns.</p>
+          <a href="/app/officer.html">Officer dashboard <span aria-hidden="true">→</span></a>
+        </article>
+      </div>
+    </section>
+
+    <section class="features-section" aria-labelledby="features-title">
+      <div class="section-heading">
+        <p class="eyebrow">Made for the way groups work</p>
+        <h2 id="features-title">Small details. A fairer system.</h2>
+      </div>
+      <div class="feature-marquee">
+        <div class="feature-track">
+          <div class="feature-group">
+            <article class="feature-card"><span>₹</span><b>Transparent pay</b><small>Pieces × rate, clearly shown</small></article>
+            <article class="feature-card"><span>✦</span><b>Fair work sharing</b><small>Skill, time and choice matter</small></article>
+            <article class="feature-card"><span>⌁</span><b>WhatsApp first</b><small>Works with the phone you have</small></article>
+            <article class="feature-card"><span>अ</span><b>Language choices</b><small>English, Hindi and Hinglish</small></article>
+            <article class="feature-card"><span>◈</span><b>Honest records</b><small>Decisions stay traceable</small></article>
+            <article class="feature-card"><span>♡</span><b>Role-based privacy</b><small>Only the right people see your data</small></article>
+          </div>
+          <div class="feature-group" aria-hidden="true">
+            <article class="feature-card"><span>₹</span><b>Transparent pay</b><small>Pieces × rate, clearly shown</small></article>
+            <article class="feature-card"><span>✦</span><b>Fair work sharing</b><small>Skill, time and choice matter</small></article>
+            <article class="feature-card"><span>⌁</span><b>WhatsApp first</b><small>Works with the phone you have</small></article>
+            <article class="feature-card"><span>अ</span><b>Language choices</b><small>English, Hindi and Hinglish</small></article>
+            <article class="feature-card"><span>◈</span><b>Honest records</b><small>Decisions stay traceable</small></article>
+            <article class="feature-card"><span>♡</span><b>Role-based privacy</b><small>Only the right people see your data</small></article>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
+
+  <footer class="site-footer">
+    <a class="brand" href="/">Sakhi Khata</a>
+    <p>Built with care for the women who make every order possible.</p>
+    <span>The AI suggests. The group decides.</span>
+  </footer>
+
+  <script>
+    fetch('/api/public').then(r => r.json()).then(config => {
+      const number = (config.whatsapp || '').replace(/\D/g, '');
+      document.querySelectorAll('a.wa').forEach(link => {
+        link.href = 'https://wa.me/' + number + (config.join ? '?text=' + encodeURIComponent(config.join) : '');
+      });
+    }).catch(() => {});
+  </script>
 </body>
 </html>

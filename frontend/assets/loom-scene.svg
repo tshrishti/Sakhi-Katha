@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 500" role="img" aria-labelledby="title desc">
+  <title id="title">Sakhi Khata handloom and ledger</title>
+  <desc id="desc">A woven indigo cloth ripples on a handloom, while a rupee coin spins among ledger blocks, cloth bags and thread spools.</desc>
+  <defs>
+    <linearGradient id="wood" x2="0" y2="1">
+      <stop stop-color="#b66a3c"/>
+      <stop offset=".5" stop-color="#8a482e"/>
+      <stop offset="1" stop-color="#603326"/>
+    </linearGradient>
+    <linearGradient id="cloth" x1="0" y1="0" x2=".95" y2="1">
+      <stop stop-color="#5655a3"/>
+      <stop offset=".52" stop-color="#302d67"/>
+      <stop offset="1" stop-color="#211e50"/>
+    </linearGradient>
+    <linearGradient id="coin" x1=".1" y1="0" x2=".9" y2="1">
+      <stop stop-color="#fff0b0"/>
+      <stop offset=".45" stop-color="#ffc857"/>
+      <stop offset="1" stop-color="#df8b17"/>
+    </linearGradient>
+    <linearGradient id="bag" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#ee7658"/>
+      <stop offset="1" stop-color="#bf3e55"/>
+    </linearGradient>
+    <pattern id="weave" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(-7)">
+      <path d="M0 3h14M0 10h14" stroke="#fff4dd" stroke-opacity=".16" stroke-width="2"/>
+      <path d="M4 0v14M11 0v14" stroke="#f1b458" stroke-opacity=".22" stroke-width="1.5"/>
+    </pattern>
+    <filter id="shadow" x="-.4" y="-.4" width="1.8" height="1.9">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="7"/>
+      <feOffset dy="9"/>
+      <feComponentTransfer><feFuncA type="linear" slope=".18"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="soft-glow" x="-.8" y="-.8" width="2.6" height="2.6">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <clipPath id="fabric-clip">
+      <path d="M133 132 Q260 119 452 145 L423 356 Q262 381 106 325Z"/>
+    </clipPath>
+  </defs>
+  <style>
+    .float { transform-box: fill-box; transform-origin: center; animation: bob 4.8s ease-in-out infinite; }
+    .float.late { animation-delay: -2.2s; }
+    .float.slow { animation-duration: 6s; }
+    .fabric { transform-box: fill-box; transform-origin: center; animation: ripple 4s ease-in-out infinite; }
+    .coin-turn { transform-box: fill-box; transform-origin: center; animation: spin 4.2s ease-in-out infinite; }
+    .orbit { transform-box: fill-box; transform-origin: center; animation: orbit 18s linear infinite; }
+    .thread { stroke-dasharray: 9 10; animation: stitch 8s linear infinite; }
+    .spark { transform-box: fill-box; transform-origin: center; animation: twinkle 2.8s ease-in-out infinite; }
+    .spark.late { animation-delay: -1.4s; }
+    @keyframes bob { 0%,100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-11px) rotate(1deg); } }
+    @keyframes ripple { 0%,100% { transform: skewY(0deg) scaleY(1); } 50% { transform: skewY(1.2deg) scaleY(.985); } }
+    @keyframes spin { 0%,12% { transform: scaleX(1); } 48%,62% { transform: scaleX(.12); } 88%,100% { transform: scaleX(1); } }
+    @keyframes orbit { to { transform: rotate(360deg); } }
+    @keyframes stitch { to { stroke-dashoffset: -152; } }
+    @keyframes twinkle { 0%,100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.2); } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+    }
+  </style>
+
+  <ellipse cx="310" cy="408" rx="218" ry="38" fill="#362c61" opacity=".1"/>
+  <circle cx="310" cy="248" r="205" fill="#f3a712" opacity=".06"/>
+  <circle cx="310" cy="248" r="180" fill="none" stroke="#d7a557" stroke-opacity=".3" stroke-dasharray="3 10"/>
+
+  <!-- Handloom frame -->
+  <g filter="url(#shadow)">
+    <path d="M128 105 455 127l-7 18-324-22z" fill="url(#wood)"/>
+    <path d="m107 320 333 26-9 17-325-26z" fill="url(#wood)"/>
+    <path d="m126 111-17 215M452 131l-18 222" fill="none" stroke="#70402d" stroke-width="13" stroke-linecap="round"/>
+    <path d="m126 111-17 215M452 131l-18 222" fill="none" stroke="#cc8a53" stroke-opacity=".65" stroke-width="3" stroke-linecap="round"/>
+    <path d="m113 167 330 20M111 280l327 23" fill="none" stroke="#d9a06a" stroke-width="3" stroke-dasharray="3 5"/>
+    <circle cx="128" cy="113" r="9" fill="#f4c078"/>
+    <circle cx="451" cy="132" r="9" fill="#f4c078"/>
+  </g>
+
+  <!-- Loom cloth and woven border -->
+  <g class="fabric">
+    <path d="M133 132 Q260 119 452 145 L423 356 Q262 381 106 325Z" fill="url(#cloth)" filter="url(#shadow)"/>
+    <g clip-path="url(#fabric-clip)">
+      <path d="M133 132 Q260 119 452 145 L423 356 Q262 381 106 325Z" fill="url(#weave)"/>
+      <path d="m100 161 355 24M95 177l355 24" fill="none" stroke="#f3a712" stroke-width="5" opacity=".92"/>
+      <path d="m103 296 333 30M100 310l330 30" fill="none" stroke="#ef7658" stroke-width="5" opacity=".92"/>
+      <path d="m110 185 338 23M107 290l331 26" fill="none" stroke="#fff0d0" stroke-width="2" opacity=".75"/>
+      <path d="M178 144 153 347M204 141 179 352M230 138 205 356M256 136 232 360M282 136 258 363M308 137 284 363M334 139 310 362M360 141 336 360M386 143 363 359M412 145 390 357" stroke="#fff5dc" stroke-opacity=".1" stroke-width="2"/>
+      <path d="M155 225q18-17 36 0t36 0 36 0 36 0 36 0 36 0 36 0" fill="none" stroke="#f6c563" stroke-width="4" opacity=".72"/>
+      <path d="M145 245q18-17 36 0t36 0 36 0 36 0 36 0 36 0 36 0" fill="none" stroke="#e9879d" stroke-width="4" opacity=".85"/>
+      <path d="M140 265q18-17 36 0t36 0 36 0 36 0 36 0 36 0 36 0" fill="none" stroke="#f6c563" stroke-width="4" opacity=".72"/>
+    </g>
+  </g>
+
+  <!-- shuttle -->
+  <g class="float slow" transform="translate(0 10)">
+    <path d="m185 246 62-15-13 28-45 5z" fill="#f4b044" stroke="#8f552e" stroke-width="2"/>
+    <path d="m186 246 22 7 26-14" fill="none" stroke="#fff0c5" stroke-width="2"/>
+    <circle cx="213" cy="249" r="3" fill="#8f552e"/>
+  </g>
+
+  <!-- Ledger blocks orbit the coin -->
+  <g class="orbit" fill="#fff8ec" stroke="#cf9c4a" stroke-width="1.4">
+    <rect x="386" y="154" width="31" height="20" rx="5" transform="rotate(-34 401 164)"/>
+    <rect x="428" y="190" width="31" height="20" rx="5" transform="rotate(-12 443 200)"/>
+    <rect x="438" y="239" width="31" height="20" rx="5" transform="rotate(12 453 249)"/>
+    <rect x="417" y="285" width="31" height="20" rx="5" transform="rotate(33 432 295)"/>
+    <rect x="376" y="316" width="31" height="20" rx="5" transform="rotate(48 391 326)"/>
+    <rect x="324" y="322" width="31" height="20" rx="5" transform="rotate(70 339 332)"/>
+    <rect x="280" y="296" width="31" height="20" rx="5" transform="rotate(99 295 306)"/>
+    <rect x="274" y="197" width="31" height="20" rx="5" transform="rotate(-64 289 207)"/>
+    <rect x="320" y="157" width="31" height="20" rx="5" transform="rotate(-48 335 167)"/>
+    <path d="M393 164h17M435 200h17M444 249h17M423 294h17M382 325h17M329 331h17M285 305h17M279 206h17M326 166h17" fill="none" stroke="#b87741" stroke-linecap="round"/>
+  </g>
+  <circle cx="365" cy="248" r="62" fill="#ffc857" opacity=".16" filter="url(#soft-glow)"/>
+  <circle cx="365" cy="248" r="55" fill="none" stroke="#eaa63c" stroke-width="2" stroke-dasharray="4 7" opacity=".7"/>
+  <g class="coin-turn" filter="url(#shadow)">
+    <circle cx="365" cy="248" r="42" fill="#ba771a" opacity=".45"/>
+    <circle cx="365" cy="243" r="39" fill="url(#coin)" stroke="#fff0bf" stroke-width="3"/>
+    <circle cx="365" cy="243" r="32" fill="none" stroke="#ba771a" stroke-opacity=".55" stroke-width="1.5"/>
+    <text x="365" y="257" text-anchor="middle" font-family="Georgia,serif" font-size="41" font-weight="700" fill="#81501b">₹</text>
+  </g>
+
+  <!-- Fabric bags -->
+  <g class="float" transform="translate(64 174)">
+    <path d="M4 21q0-8 9-8h32q9 0 9 8l-4 42q-1 8-9 8H17q-8 0-9-8z" fill="url(#bag)" filter="url(#shadow)"/>
+    <path d="M16 17q0-15 13-15t13 15" fill="none" stroke="#8f4c41" stroke-width="5" stroke-linecap="round"/>
+    <path d="M18 44q11-12 22 0-11 13-22 0z" fill="#ffc857"/>
+    <path d="M12 32h32M12 56h32" stroke="#ffd8a1" stroke-opacity=".55" stroke-width="2"/>
+  </g>
+  <g class="float late" transform="translate(475 303) scale(.8)">
+    <path d="M4 21q0-8 9-8h32q9 0 9 8l-4 42q-1 8-9 8H17q-8 0-9-8z" fill="#d98735" filter="url(#shadow)"/>
+    <path d="M16 17q0-15 13-15t13 15" fill="none" stroke="#8d512d" stroke-width="5" stroke-linecap="round"/>
+    <path d="M18 44q11-12 22 0-11 13-22 0z" fill="#302d67"/>
+    <path d="M12 32h32M12 56h32" stroke="#fff0bf" stroke-opacity=".6" stroke-width="2"/>
+  </g>
+
+  <!-- Spools -->
+  <g class="float late" transform="translate(493 100) rotate(12)">
+    <ellipse cx="22" cy="5" rx="22" ry="8" fill="#f2ba62" stroke="#a76b37" stroke-width="2"/>
+    <path d="M0 5v38q22 15 44 0V5" fill="#d45772"/>
+    <path d="M4 12q18 8 36 0M3 19q19 8 38 0M2 26q20 8 40 0M2 33q20 8 40 0" fill="none" stroke="#ffd2bb" stroke-width="2"/>
+    <ellipse cx="22" cy="43" rx="22" ry="8" fill="#b53f5c"/>
+  </g>
+  <g class="float slow" transform="translate(83 350) rotate(-18) scale(.78)">
+    <ellipse cx="22" cy="5" rx="22" ry="8" fill="#f2ba62" stroke="#a76b37" stroke-width="2"/>
+    <path d="M0 5v38q22 15 44 0V5" fill="#7772bc"/>
+    <path d="M4 12q18 8 36 0M3 19q19 8 38 0M2 26q20 8 40 0M2 33q20 8 40 0" fill="none" stroke="#eee8d8" stroke-width="2"/>
+    <ellipse cx="22" cy="43" rx="22" ry="8" fill="#49458b"/>
+  </g>
+
+  <!-- Flowing thread -->
+  <path class="thread" d="M95 111C175 38 237 73 286 119s114 44 166-8 97-23 111 19" fill="none" stroke="#d6336c" stroke-width="3" stroke-linecap="round"/>
+  <path class="thread" d="M64 391c73-31 99-2 141 23s96 14 133-14 87-34 132-6 69 18 105-5" fill="none" stroke="#e8a331" stroke-width="3" stroke-linecap="round" opacity=".85"/>
+
+  <!-- woven glints -->
+  <g fill="#eaa63c">
+    <path class="spark" d="m84 129 3 8 8 3-8 3-3 8-3-8-8-3 8-3z"/>
+    <circle class="spark late" cx="523" cy="256" r="4"/>
+    <path class="spark late" d="m514 365 2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/>
+    <circle class="spark" cx="238" cy="82" r="3"/>
+  </g>
+</svg>
