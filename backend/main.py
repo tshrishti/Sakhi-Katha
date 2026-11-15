@@ -2,7 +2,7 @@ import envload  # noqa: F401  (loads .env before anything reads the environment)
 import asyncio, base64, contextlib, csv, hmac, io, json, logging, os, pathlib, threading, time
 from xml.sax.saxutils import escape
 from sqlalchemy import func, select
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import auth, bootstrap, bot, db, events, media as mediafetch, svc, voice
@@ -219,6 +219,8 @@ def b_dphoto(oid: int, i: int, u=B): return _img(svc.delivery_photo_get(u, oid, 
 L = Depends(auth.require("leader"))
 @app.get("/api/leader/orders")
 def l_orders(u=L): return svc.my_orders(u)
+@app.get("/api/leader/orders/{oid}/review")
+def l_review(oid: int, u=L): return svc.review(u, oid)
 @app.get("/api/leader/overview")
 def l_overview(summary: bool = False, u=L): return svc.leader_overview(u, summary_only=summary)
 @app.get("/api/leader/orders/{oid}")
@@ -323,7 +325,7 @@ def s_checklist(oid: int, u=M): return svc.get_checklist(u, oid)
 @app.post("/api/seller/orders/{oid}/accept")
 def s_accept(oid: int, u=M): return svc.accept_task(u, oid)
 @app.post("/api/seller/orders/{oid}/decline")
-def s_decline(oid: int, u=M): return svc.decline(u, oid)
+def s_decline(oid: int, b: dict = Body(default={}), u=M): return svc.decline(u, oid, b.get("reason", ""))
 @app.post("/api/seller/orders/{oid}/issue")
 def s_issue(oid: int, b: dict, u=M): return svc.report_issue(u, oid, b.get("text", ""))
 @app.get("/api/seller/notices")

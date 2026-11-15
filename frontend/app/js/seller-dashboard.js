@@ -249,7 +249,9 @@ async function memberSendConcern() {
 async function memberAction(orderId, action) {
   if (action === 'decline' && !confirm('Tell your leader you cannot do this task? There is no penalty.')) return;
   const routes = {accept: `/seller/orders/${orderId}/accept`, decline: `/seller/orders/${orderId}/decline`, approve: `/seller/orders/${orderId}/payout/approve`};
-  await act(routes[action], 'POST', {}, loadMember);
+  const reason = action === 'decline' ? prompt('Optional reason for your leader:') : null;
+  if (action === 'decline' && reason === null) return;
+  await act(routes[action], 'POST', action === 'decline' ? {reason} : {}, loadMember);
 }
 
 function memberReport(orderId, remaining, stage) {

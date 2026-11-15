@@ -60,7 +60,7 @@ def _view(s, o, user):
                 "rating": {"stars": rating.stars, "comment": rating.comment} if rating else None}
     q = [{**{k: x[k] for k in x if k != "photo"}, "has_photo": bool(x.get("photo"))} for x in d.get("quality", [])]
     return {**v, "rate_card": {k: (d.get("rate_card") or ratecards.default_card(defaults.DEFAULT_PRODUCT)).get(k) for k in ("product", "version", "source")}, "price": d.get("price"), "plan": d.get("plan"), "payout": d.get("payout"), "approvals": d.get("approvals"),
-            "disputes": d.get("disputes", []), "declined": d.get("declined", []), "quality": q, "progress": pg, "risk": d.get("risk"),
+            "disputes": d.get("disputes", []), "declined": d.get("declined", []), "decline_details": d.get("decline_details", []), "quality": q, "progress": pg, "risk": d.get("risk"),
             "checklist": _checklist(o)}
 def _checklist(o):
     """The buyer-specification checklist. Orders made before this feature get one built from their details."""
@@ -612,12 +612,18 @@ def seller_home(user, now=None):
                 "pay_waiting": sum(float(entry["line"]["total_expected"]) for entry in pays
                                    if entry["status"] == "payout_pending"),
                 "latest_updates": latest, "last_seq": -1 if latest_seq is None else latest_seq}
-def decline(user, oid):
+def decline(user, oid, reason=""):
     with db.S() as s:
         o = _order(s, oid, user); _need(o, "accepted", "planned")
-        if not any(x["member"] == user["id"] for x in (o.data.get("plan") or {}).get("assignments", [])): raise Err(403, "You have no task in this order")
-        _set(o, "accepted", plan=None, task_accepted=[], declined=o.data.get("declined", []) + [user["id"]]); _log(s, o, "member.declined", user); s.commit()
-        _tell(s, o.group_id, "leader", f"{user['name']} cannot do her task in order #{o.id}. No penalty. Send PLAN {o.id} to replan.")
+        assignment = next((x for x in (o.data.get("plan") or {}).get("assignments", []) if x["member"] == user["id"]), None)
+        if assignment is None: raise Err(403, "You have no task in this order")
+        reason = str(reason).strip()[:200]
+        details = list(o.data.get("decline_details", []))
+        details.append({"member": user["id"], "name": user["name"], "stage": assignment["stage"], "reason": reason})
+        _set(o, "accepted", plan=None, task_accepted=[], declined=o.data.get("declined", []) + [user["id"]], decline_details=details)
+        _log(s, o, "member.declined", user, {"stage": assignment["stage"], "reason": reason}); s.commit()
+        suffix = f" Reason: {reason}" if reason else ""
+        _tell(s, o.group_id, "leader", f"{user['name']} cannot do her task in order #{o.id}.{suffix} No penalty. Send PLAN {o.id} to replan.")
         return {"ok": True}
 def accept_task(user, oid):
     with db.S() as s:
@@ -656,7 +662,9 @@ def officer_summary(min_cell=3):
         for g in s.scalars(select(db.Group)):
             os_ = list(s.scalars(select(db.Order).where(db.Order.group_id == g.id)))
             base = {"group": g.name, "block": g.block, "district": g.district}
-            if len(os_) < min_cell: rows.append({**base, "orders": f"<{min_cell}"}); continue
+            if len(os_) < min_cell:
+                rows.append({**base, "group": "Suppressed", "block": "Suppressed", "district": "Suppressed", "orders": f"<{min_cell}"})
+                continue
             rows.append({**base, "orders": len(os_), "settled": sum(o.status in POST_PAY for o in os_),
                          "in_progress": sum(o.status in ("accepted", "planned", "in_production", "payout_pending") for o in os_),
                          "in_delivery": sum(o.status in ("ready_for_delivery", "dispatched", "partially_delivered") for o in os_),

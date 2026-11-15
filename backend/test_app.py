@@ -40,6 +40,44 @@ def test_full_lifecycle_with_quorum_and_scoping(world):
     assert l.get("/api/ledger/verify").json()["valid"]
     assert world.login("+919000000102").get("/api/leader/orders").status_code == 403   # a member is not a leader
 
+def test_leader_read_only_feasibility_review_is_role_scoped(world):
+    b, l = world.login(BUYER), world.login(LEADER)
+    gid = b.get("/api/buyer/groups").json()[0]["id"]
+    oid = b.post("/api/buyer/orders", json={"group_id": gid, "text": ORDER}).json()["id"]
+    review = l.get(f"/api/leader/orders/{oid}/review")
+    assert review.status_code == 200
+    data = review.json()
+    assert data["feasible"] is True
+    assert data["price"]["per_unit"]["floor"] == "84.74"
+    assert "issues" in data and "options" in data and "rate_card" in data
+    assert b.get(f"/api/leader/orders/{oid}/review").status_code == 403
+
+def test_member_decline_reason_and_problem_report_reach_leader(world):
+    b, l, m = world.login(BUYER), world.login(LEADER), world.login("+919000000101")
+    gid = b.get("/api/buyer/groups").json()[0]["id"]
+    oid = b.post("/api/buyer/orders", json={"group_id": gid, "text": ORDER}).json()["id"]
+    l.post(f"/api/leader/orders/{oid}/quote", json={})
+    b.post(f"/api/buyer/orders/{oid}/accept")
+    l.post(f"/api/leader/orders/{oid}/plan")
+    declined = m.post(f"/api/seller/orders/{oid}/decline", json={"reason": "My sewing machine is being repaired"})
+    assert declined.status_code == 200
+    detail = l.get("/api/leader/orders").json()[0]["decline_details"][0]
+    assert detail["stage"] == "stitching" and "sewing machine" in detail["reason"]
+    reported = m.post(f"/api/seller/orders/{oid}/issue", json={"text": "Need more thread"})
+    assert reported.status_code == 200
+
+def test_member_action_response_does_not_expose_group_pay_or_members(world):
+    start_order()
+    m = world.login(SELLER)
+    response = m.post("/api/seller/orders/1/done", json={"n": 1})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "plan" not in payload and "payout" not in payload and "disputes" not in payload
+    assert payload["order_id"] == 1 and payload["stage"] == "cutting"
+    assert "name" not in payload and "member" not in payload and "pay" not in payload
+    issue = m.post("/api/seller/orders/1/issue", json={"text": "Need more thread"})
+    assert issue.status_code == 200
+
 def test_dispute_blocks_settlement_until_resolved(world):
     b, l, s = world.login(BUYER), world.login(LEADER), world.login(SELLER)
     gid = b.get("/api/buyer/groups").json()[0]["id"]; oid = b.post("/api/buyer/orders", json={"group_id": gid, "text": ORDER}).json()["id"]
@@ -53,9 +91,10 @@ def test_dispute_blocks_settlement_until_resolved(world):
 def test_officer_sees_aggregates_only(world):
     b, o = world.login(BUYER), world.login(OFFICER)
     gid = b.get("/api/buyer/groups").json()[0]["id"]; b.post("/api/buyer/orders", json={"group_id": gid, "text": ORDER})
-    r = o.get("/api/officer/summary").json(); assert r[0]["orders"] == "<3"            # small cells suppressed
+    r = o.get("/api/officer/summary").json(); assert r[0]["orders"] == "<3"            # small cells and identifiers suppressed
+    assert r[0]["group"] == r[0]["block"] == r[0]["district"] == "Suppressed"
     csv = o.get("/api/officer/export.csv").text
-    assert "+91" not in csv and "Lakshmi" not in csv and "Test Buyer" not in csv
+    assert "+91" not in csv and "Lakshmi" not in csv and "Test Buyer" not in csv and "Test SHG" not in csv
 
 def test_whatsapp_bot_roles_and_idempotency(world):
     assert "Choose your language" in bot.handle("whatsapp:+911234567890", "hi")          # OPEN_REGISTRATION=1: a new number starts registration
