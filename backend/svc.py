@@ -1,5 +1,6 @@
 """Business rules shared by the REST dashboards and the WhatsApp bot. Every function checks the caller's role and scope."""
 import hashlib, math, os, time
+from decimal import Decimal as D
 from sqlalchemy import func, select
 import db, engine as E, i18n, llm, notify, screening
 import defaults, ratecards
@@ -46,9 +47,72 @@ def _order(s, oid, user):
 def _tell(s, group_id, role, text):
     for u in s.scalars(select(db.User).where(db.User.group_id == group_id, db.User.role == role, db.User.active == True)):  # noqa: E712
         notify.send(u.phone, text)
+def _queue_action(s, user, kind, oid, key, args, title_key, title_args=None, remind=False):
+    """Persist a recipient-specific WhatsApp choice before sending its prompt."""
+    state = s.get(db.ChatState, user.phone) or db.ChatState(
+        phone=user.phone, history=[], lang=user.lang or "en", updated_at=time.time()
+    )
+    pending = dict(state.pending_action or {})
+    items = list(pending.get("items", []))
+    if pending.get("type") == "join_request":
+        for request_id in pending.get("ids", []):
+            request = s.get(db.JoinRequest, request_id)
+            if request and request.status == "pending":
+                items.append({
+                    "kind": "join_request", "id": request.id, "key": "leader_join_request",
+                    "args": {"name": request.name, "skill": request.skill},
+                    "title_key": "action_title_join", "title_args": {"order": request.id},
+                })
+    item = {
+        "kind": kind, "id": int(oid), "key": key, "args": args,
+        "title_key": title_key,
+        "title_args": {"order": int(oid), **(title_args or {})},
+    }
+    duplicate_index = next((i for i, x in enumerate(items)
+                            if x.get("kind") == kind and x.get("id") == int(oid)), None)
+    if duplicate_index is not None and not remind and items[duplicate_index].get("key") == key:
+        return False
+    if duplicate_index is not None:
+        items[duplicate_index] = item
+        selected = pending.get("selected")
+        if selected and selected.get("kind") == kind and selected.get("id") == int(oid):
+            selected = None
+        else:
+            selected = pending.get("selected")
+        state.pending_action = {"type": "actions", "items": items, "selected": selected}
+        state.updated_at = time.time()
+        s.merge(state)
+        s.commit()
+    else:
+        items.append(item)
+        state.pending_action = {"type": "actions", "items": items, "selected": None}
+        state.updated_at = time.time()
+        s.merge(state)
+        s.commit()
+    lang = user.lang or "en"
+    if len(items) == 1:
+        message = i18n.action_text(item, lang)
+    else:
+        rows = [f"{i}. {i18n.t(x['title_key'], lang, **x.get('title_args', {}))}"
+                for i, x in enumerate(items, 1)]
+        message = i18n.t("multiple_actions", lang, items="\n".join(rows))
+    notify.send(user.phone, message)
+    return True
+
+def _remove_action(s, user, kind, oid):
+    state = s.get(db.ChatState, user.phone)
+    if not state or not state.pending_action:
+        return
+    pending = dict(state.pending_action)
+    items = [x for x in pending.get("items", [])
+             if not (x.get("kind") == kind and x.get("id") == int(oid))]
+    state.pending_action = {"type": "actions", "items": items, "selected": None} if items else None
+    state.updated_at = time.time()
+
 def _view(s, o, user):
     d = o.data
-    v = {"id": o.id, "status": o.status, "order": d["order"], "unclear": d.get("unclear", []), "quote": d.get("quote"), "product": (d.get("rate_card") or {}).get("product", defaults.DEFAULT_PRODUCT), "delivery": _dview(o), "due_at": o.data.get("due_at"), "days_left": _days_left(o), "task_accepted": o.data.get("task_accepted", [])}
+    lang = _lang(s, user["id"])
+    v = {"id": o.id, "status": o.status, "status_label": i18n.status_label(o.status, lang), "order": d["order"], "unclear": d.get("unclear", []), "quote": d.get("quote"), "product": (d.get("rate_card") or {}).get("product", defaults.DEFAULT_PRODUCT), "delivery": _dview(o), "due_at": o.data.get("due_at"), "days_left": _days_left(o), "task_accepted": o.data.get("task_accepted", [])}
     pg = _progress(o)
     if user["role"] == "buyer":                         # buyers never see cost, plan, members or pay: only how far along the work is
         g = s.get(db.Group, o.group_id)
@@ -60,7 +124,7 @@ def _view(s, o, user):
                 "rating": {"stars": rating.stars, "comment": rating.comment} if rating else None}
     q = [{**{k: x[k] for k in x if k != "photo"}, "has_photo": bool(x.get("photo"))} for x in d.get("quality", [])]
     return {**v, "rate_card": {k: (d.get("rate_card") or ratecards.default_card(defaults.DEFAULT_PRODUCT)).get(k) for k in ("product", "version", "source")}, "price": d.get("price"), "plan": d.get("plan"), "payout": d.get("payout"), "approvals": d.get("approvals"),
-            "disputes": d.get("disputes", []), "declined": d.get("declined", []), "quality": q, "progress": pg, "risk": d.get("risk"),
+            "disputes": d.get("disputes", []), "declined": d.get("declined", []), "decline_details": d.get("decline_details", []), "quality": q, "progress": pg, "risk": d.get("risk"),
             "checklist": _checklist(o)}
 def _checklist(o):
     """The buyer-specification checklist. Orders made before this feature get one built from their details."""
@@ -422,12 +486,11 @@ def submit_order(user, group_id, text, pre=None):
                 db.User.group_id == g.id, db.User.role == "leader", db.User.active == True
             ))  # noqa: E712
             for leader in leaders:
-                notify.send(leader.phone, i18n.t(
-                    "new_order_notice", leader.lang or "en",
-                    order=o.id, buyer=od.get("buyer_name") or user.get("name") or "Buyer",
-                    qty=od["qty"], product=od.get("product") or defaults.DEFAULT_PRODUCT,
-                    price=od["offered_price"], days=od["deadline_days"],
-                ))
+                _queue_action(s, leader, "leader_order", o.id, "new_order_notice", {
+                    "order": o.id, "buyer": od.get("buyer_name") or user.get("name") or "Buyer",
+                    "qty": od["qty"], "product": od.get("product") or defaults.DEFAULT_PRODUCT,
+                    "price": od["offered_price"], "days": od["deadline_days"],
+                }, "action_title_order")
         return _view(s, o, user)
 def my_orders(user):
     with db.S() as s:
@@ -438,7 +501,10 @@ def accept_quote(user, oid):
         o = _order(s, oid, user); _need(o, "quoted")
         if user["role"] == "leader" and not o.data.get("on_behalf"): raise Err(403, "Only the buyer can accept this quote")
         _set(o, "accepted"); _log(s, o, "quote.accepted", user, {"quote": o.data["quote"]}); s.commit()
-        _tell(s, o.group_id, "leader", f"Buyer accepted order #{o.id} at Rs {o.data['quote']}. Send PLAN {o.id}.")
+        for leader in s.scalars(select(db.User).where(db.User.group_id == o.group_id, db.User.role == "leader", db.User.active == True)):  # noqa: E712
+            _queue_action(s, leader, "leader_order", o.id, "accepted_order_action", {
+                "order": o.id, "price": o.data["quote"],
+            }, "action_title_plan")
         return _view(s, o, user)
 
 # ---- leader ----
@@ -464,7 +530,10 @@ def quote(user, oid, counter=None):
         try: c = str(counter if counter not in (None, "") else p["suggested_counter"]); assert float(c) > 0
         except Exception: raise Err(422, "Counter price must be a positive number")
         _set(o, "quoted", price=p, quote=c); _log(s, o, "quote.sent", user, {"quote": c, "floor": p["per_unit"]["floor"], "rate_card_version": _card(o)["version"], "product": _card(o)["product"]}); s.commit()
-        b = s.get(db.User, o.buyer_id); notify.send(b.phone, f"Quote for order #{o.id}: Rs {c} per piece. Reply ACCEPT {o.id} to confirm.")
+        b = s.get(db.User, o.buyer_id)
+        total = format(D(str(c)) * D(str(od["qty"])), "f").rstrip("0").rstrip(".")
+        _queue_action(s, b, "quote", o.id, "quote_action",
+                      {"order": o.id, "price": c, "total": total}, "action_title_quote")
         return _view(s, o, user)
 def plan(user, oid):
     with db.S() as s:
@@ -486,18 +555,56 @@ def start(user, oid):
         due = time.time() + int(o.data["order"]["deadline_days"]) * 86400      # the real delivery date; reminders and risk checks count down from it
         _set(o, "in_production", due_at=due); _log(s, o, "production.started", user, {"assignments": len(a["assignments"]), "due_at": round(due)}); s.commit()
         for x in a["assignments"]:
-            m = s.get(db.User, x["member"]); notify.send(m.phone, i18n.t("task", m.lang, o=o.id, stage=i18n.stage(x["stage"], m.lang), n=x["units"], pay=x["expected_pay"]))
+            m = s.get(db.User, x["member"])
+            args = {"order": o.id, "stage_code": x["stage"], "units": x["units"],
+                    "pay": x["expected_pay"], "date": time.strftime("%d %b %Y", time.localtime(due))}
+            if m.id in o.data.get("task_accepted", []):
+                rendered = {**args, "stage": i18n.stage(x["stage"], m.lang)}
+                notify.send(m.phone, i18n.t("task_started", m.lang or "en", **rendered))
+            else:
+                _queue_action(s, m, "task", o.id, "task_action", args, "action_title_task")
         return _view(s, o, user)
+def _payout_lines(o, results=None):
+    lines = []
+    for x in o.data["plan"]["assignments"]:
+        rw = min(int(o.data.get("rework", {}).get(_key(x), 0)), x["units"])
+        r = (results or {}).get(_key(x), {"accepted": x["units"] - rw, "pending": rw})
+        acc, pen = int(r.get("accepted", x["units"])), int(r.get("pending", 0))
+        if acc < 0 or pen < 0 or acc + pen > x["units"]:
+            raise Err(422, f"Invalid counts for {x['name']} ({x['stage']})")
+        lines.append({"member": x["member"], "name": x["name"], "stage": x["stage"],
+                      "accepted": acc, "pending": pen, "rate": x["rate"]})
+    return lines
+
+def payout_preview(user, oid):
+    """Read-only payout totals for the leader's explicit confirmation step."""
+    with db.S() as s:
+        o = _order(s, oid, user)
+        _need(o, "in_production", "payout_pending")
+        return E.payout(_payout_lines(o))
+
 def propose_payout(user, oid, results):
     with db.S() as s:
-        o = _order(s, oid, user); _need(o, "in_production", "payout_pending"); lines = []
-        for x in o.data["plan"]["assignments"]:
-            rw = min(int(o.data.get("rework", {}).get(_key(x), 0)), x["units"])
-            r = (results or {}).get(_key(x), {"accepted": x["units"] - rw, "pending": rw}); acc, pen = int(r.get("accepted", x["units"])), int(r.get("pending", 0))
-            if acc < 0 or pen < 0 or acc + pen > x["units"]: raise Err(422, f"Invalid counts for {x['name']} ({x['stage']})")
-            lines.append({"member": x["member"], "name": x["name"], "stage": x["stage"], "accepted": acc, "pending": pen, "rate": x["rate"]})
+        o = _order(s, oid, user); _need(o, "in_production", "payout_pending")
+        lines = _payout_lines(o, results)
         _set(o, "payout_pending", payout=E.payout(lines), approvals={"leader": False, "members": []}, payout_at=time.time()); _log(s, o, "payout.proposed", user, {"total": o.data["payout"]["total"]}); s.commit()
-        for m in {l["member"] for l in lines}: mu = s.get(db.User, m); notify.send(mu.phone, i18n.t("pay_ready", mu.lang, o=o.id))
+        by_member = {}
+        for line in o.data["payout"]["lines"]:
+            totals = by_member.setdefault(line["member"], {"amount": D("0"), "units": 0, "pending": 0})
+            totals["amount"] += D(line["total_expected"])
+            totals["units"] += int(line["accepted"]) + int(line.get("pending", 0))
+            totals["pending"] += int(line.get("pending", 0))
+        for member_id, totals in by_member.items():
+            member = s.get(db.User, member_id)
+            _queue_action(s, member, "payout", o.id, "payout_action", {
+                "order": o.id, "amount": str(totals["amount"]),
+                "units": totals["units"], "pending": totals["pending"],
+            }, "action_title_payout")
+        units = sum(value["units"] for value in by_member.values())
+        for leader in s.scalars(select(db.User).where(db.User.group_id == o.group_id, db.User.role == "leader", db.User.active == True)):  # noqa: E712
+            _queue_action(s, leader, "leader_payout", o.id, "leader_payout_action", {
+                "order": o.id, "amount": o.data["payout"]["total"], "units": units,
+            }, "action_title_leader_payout")
         return _view(s, o, user)
 def _settle(s, o, user):
     ap, members = o.data["approvals"], {l["member"] for l in _lines(o)}
@@ -536,7 +643,7 @@ def members(user):
 # ---- seller (SHG member): sees ONLY her own lines ----
 def tasks(user):
     with db.S() as s:
-        out = []
+        out = []; lang = _lang(s, user["id"])
         for o in s.scalars(select(db.Order).where(db.Order.group_id == user["group_id"]).order_by(db.Order.id.desc())):
             assignments = (o.data.get("plan") or {}).get("assignments", [])
             stage_progress = {}
@@ -548,11 +655,11 @@ def tasks(user):
             journey = [{**stage, "pct": int(100 * stage["done"] / stage["units"]) if stage["units"] else 0}
                        for stage in stage_progress.values()]
             for x in assignments:
-                if x["member"] == user["id"]: out.append({"order_id": o.id, "status": o.status, **x, "accepted": user["id"] in o.data.get("task_accepted", []), "done": min(int(o.data.get("progress", {}).get(_key(x), 0)), x["units"]),
+                if x["member"] == user["id"]: out.append({"order_id": o.id, "status": o.status, "status_label": i18n.status_label(o.status, lang), **x, "accepted": user["id"] in o.data.get("task_accepted", []), "done": min(int(o.data.get("progress", {}).get(_key(x), 0)), x["units"]),
                                 "product": (o.data.get("rate_card") or {}).get("product", defaults.DEFAULT_PRODUCT),
                                 "quantity": o.data["order"]["qty"], "due_at": o.data.get("due_at"),
                                 "days_left": _days_left(o), "journey": journey,
-                                "quality": next(({"status": q["status"], "reason": q.get("reason", ""),
+                                "quality": next(({"status": q["status"], "status_label": i18n.status_label(q["status"], lang), "reason": q.get("reason", ""),
                                                   "rework": q.get("rework", 0), "ts": q.get("ts")}
                                                  for q in reversed(o.data.get("quality", []))
                                                  if q.get("member") == user["id"] and q.get("stage") == x["stage"]), None),
@@ -566,7 +673,7 @@ def earnings(user):
                 if l["member"] == user["id"]:
                     disputes = [{"open": d["open"], "reason": d["reason"], "note": d.get("note", ""),
                                 "ts": d.get("ts")} for d in o.data.get("disputes", []) if d.get("uid") == user["id"]]
-                    out.append({"order_id": o.id, "status": o.status, "line": l, "explain": i18n.explain(l, lang),
+                    out.append({"order_id": o.id, "status": o.status, "status_label": i18n.status_label(o.status, lang), "line": l, "explain": i18n.explain(l, lang),
                                 "approved_by_me": user["id"] in o.data["approvals"]["members"],
                                 "leader_approved": bool(o.data["approvals"]["leader"]),
                                 "disputes": disputes})
@@ -620,12 +727,18 @@ def seller_home(user, now=None):
                 "pay_waiting": sum(float(entry["line"]["total_expected"]) for entry in pays
                                    if entry["status"] == "payout_pending"),
                 "latest_updates": latest, "last_seq": -1 if latest_seq is None else latest_seq}
-def decline(user, oid):
+def decline(user, oid, reason=""):
     with db.S() as s:
         o = _order(s, oid, user); _need(o, "accepted", "planned")
-        if not any(x["member"] == user["id"] for x in (o.data.get("plan") or {}).get("assignments", [])): raise Err(403, "You have no task in this order")
-        _set(o, "accepted", plan=None, task_accepted=[], declined=o.data.get("declined", []) + [user["id"]]); _log(s, o, "member.declined", user); s.commit()
-        _tell(s, o.group_id, "leader", f"{user['name']} cannot do her task in order #{o.id}. No penalty. Send PLAN {o.id} to replan.")
+        assignment = next((x for x in (o.data.get("plan") or {}).get("assignments", []) if x["member"] == user["id"]), None)
+        if assignment is None: raise Err(403, "You have no task in this order")
+        reason = str(reason).strip()[:200]
+        details = list(o.data.get("decline_details", []))
+        details.append({"member": user["id"], "name": user["name"], "stage": assignment["stage"], "reason": reason})
+        _set(o, "accepted", plan=None, task_accepted=[], declined=o.data.get("declined", []) + [user["id"]], decline_details=details)
+        _log(s, o, "member.declined", user, {"stage": assignment["stage"], "reason": reason}); s.commit()
+        suffix = f" Reason: {reason}" if reason else ""
+        _tell(s, o.group_id, "leader", f"{user['name']} cannot do her task in order #{o.id}.{suffix} No penalty. Send PLAN {o.id} to replan.")
         return {"ok": True}
 def accept_task(user, oid):
     with db.S() as s:
@@ -664,7 +777,9 @@ def officer_summary(min_cell=3):
         for g in s.scalars(select(db.Group)):
             os_ = list(s.scalars(select(db.Order).where(db.Order.group_id == g.id)))
             base = {"group": g.name, "block": g.block, "district": g.district}
-            if len(os_) < min_cell: rows.append({**base, "orders": f"<{min_cell}"}); continue
+            if len(os_) < min_cell:
+                rows.append({**base, "group": "Suppressed", "block": "Suppressed", "district": "Suppressed", "orders": f"<{min_cell}"})
+                continue
             rows.append({**base, "orders": len(os_), "settled": sum(o.status in POST_PAY for o in os_),
                          "in_progress": sum(o.status in ("accepted", "planned", "in_production", "payout_pending") for o in os_),
                          "in_delivery": sum(o.status in ("ready_for_delivery", "dispatched", "partially_delivered") for o in os_),
@@ -827,18 +942,37 @@ def run_reminders(now=None):
                     if r["shortfall"] > 0 and _once(o, "risk", now):
                         _set(o, risk={**r, "days_left_source": "from the delivery date"})
                         LED.append("risk.alert", {"shortfall": r["shortfall"], "days_left": r["days_left"]}, "system:reminders", o.id, s=s)
-                        _tell(s, o.group_id, "leader", f"Order #{o.id}: at the current pace you are about {r['shortfall']} pieces short, with {r['days_left']} day(s) to the delivery date. Open the order to see options.")
+                        for leader in s.scalars(select(db.User).where(db.User.group_id == o.group_id, db.User.role == "leader", db.User.active == True)):  # noqa: E712
+                            _queue_action(s, leader, "leader_risk", o.id, "leader_risk_action", {
+                                "order": o.id, "shortfall": r["shortfall"], "days": r["days_left"],
+                            }, "action_title_risk", {"shortfall": r["shortfall"], "days": r["days_left"]}, remind=True)
                         c["deadline_risk"] += 1
                 old = [i for i, q in enumerate(o.data.get("quality", [])) if q["status"] == "pending" and now - q.get("ts", 0) >= SAMPLE_NUDGE_MIN * 60 and _once(o, f"sample:{i}", now)]
-                if old: _tell(s, o.group_id, "leader", f"Order #{o.id}: {len(old)} sample(s) are waiting for your review. Members cannot make more until you pass or send them back."); c["sample_review"] += len(old)
+                if old:
+                    for leader in s.scalars(select(db.User).where(db.User.group_id == o.group_id, db.User.role == "leader", db.User.active == True)):  # noqa: E712
+                        _queue_action(s, leader, "leader_sample", o.id, "leader_sample_action", {
+                            "order": o.id, "count": len(old),
+                        }, "action_title_sample", {"count": len(old)}, remind=True)
+                    c["sample_review"] += len(old)
             else:
                 if now - (o.data.get("payout_at") or o.created or 0) < PAYOUT_NUDGE_H * 3600: continue
                 ap = o.data.get("approvals") or {"leader": False, "members": []}
                 if not ap["leader"] and _once(o, "payout:leader", now):
-                    _tell(s, o.group_id, "leader", f"Order #{o.id}: the payout of Rs {o.data['payout']['total']} is waiting for your approval."); c["payout_approval"] += 1
+                    units = sum(int(line["accepted"]) + int(line.get("pending", 0)) for line in _lines(o))
+                    for leader in s.scalars(select(db.User).where(db.User.group_id == o.group_id, db.User.role == "leader", db.User.active == True)):  # noqa: E712
+                        _queue_action(s, leader, "leader_payout", o.id, "leader_payout_action", {
+                            "order": o.id, "amount": o.data["payout"]["total"], "units": units,
+                        }, "action_title_leader_payout", remind=True)
+                    c["payout_approval"] += 1
                 for mid in sorted({l["member"] for l in _lines(o)} - set(ap["members"])):
                     if _once(o, f"payout:{mid}", now):
-                        m = s.get(db.User, mid); notify.send(m.phone, i18n.t("pay_nudge", m.lang, o=o.id)); c["payout_approval"] += 1
+                        m = s.get(db.User, mid)
+                        lines = [line for line in _lines(o) if line["member"] == mid]
+                        notify.send(m.phone, i18n.t("payout_action", m.lang or "en",
+                            order=o.id, amount=str(sum((D(line["total_expected"]) for line in lines), D("0"))),
+                            units=sum(int(line["accepted"]) + int(line.get("pending", 0)) for line in lines),
+                            pending=sum(int(line.get("pending", 0)) for line in lines)))
+                        c["payout_approval"] += 1
         s.commit()
     return {**c, "escalated": escalate_overdue()}
 
@@ -1255,16 +1389,10 @@ def submit_join_request(phone, name, skill, lang, code, consent=False):
                    f"join_request:{request.id}", s=s)
         leaders = list(s.scalars(select(db.User).where(db.User.group_id == invite.group_id, db.User.role == "leader", db.User.active == True)))  # noqa: E712
         for leader in leaders:
-            state = s.get(db.ChatState, leader.phone) or db.ChatState(phone=leader.phone, updated_at=time.time())
-            pending_action = dict(state.pending_action or {})
-            ids = list(pending_action.get("ids", [])) if pending_action.get("type") == "join_request" else []
-            if request.id not in ids: ids.append(request.id)
-            state.pending_action = {"type": "join_request", "ids": ids}
-            state.updated_at = time.time()
-            s.merge(state)
-            if len(ids) == 1:
-                notify.send(leader.phone, i18n.t("leader_join_request", leader.lang,
-                                                 name=request.name, skill=i18n.stage(request.skill, leader.lang) or "not specified"))
+            _queue_action(s, leader, "join_request", request.id, "leader_join_request", {
+                "name": request.name,
+                "skill": request.skill,
+            }, "action_title_join")
         s.commit()
         return {"ok": True, "request_id": request.id, "group_id": invite.group_id}
 
@@ -1301,16 +1429,8 @@ def resolve_join_request(user, request_id, approve):
             LED.append("member.join_rejected", {"request_id": request.id}, f"leader:{user['id']}", s=s)
             notify.send(request.phone, i18n.t("join_rejected", request.lang))
         leader = s.get(db.User, user["id"])
-        state = s.get(db.ChatState, leader.phone) if leader else None
-        if state and (state.pending_action or {}).get("type") == "join_request":
-            ids = [rid for rid in state.pending_action.get("ids", []) if rid != request.id]
-            state.pending_action = {"type": "join_request", "ids": ids} if ids else None
-            state.updated_at = time.time()
-            if ids:
-                following = s.get(db.JoinRequest, ids[0])
-                if following and following.status == "pending":
-                    notify.send(leader.phone, i18n.t("leader_join_request", leader.lang,
-                                                     name=following.name, skill=i18n.stage(following.skill, leader.lang) or "not specified"))
+        if leader:
+            _remove_action(s, leader, "join_request", request.id)
         s.commit()
         return {"ok": True, "status": request.status, "name": request.name}
 
@@ -1405,7 +1525,11 @@ def dispatch(user, oid, courier, tracking="", date="", note=""):
         o = _order(s, oid, user); _need(o, "ready_for_delivery"); d = _dv(o); qc = d["qc"]
         sh = {"i": len(d["shipments"]), "qty": qc["counted"], "courier": courier, "tracking": str(tracking or "")[:60], "date": str(date or "")[:30], "note": str(note)[:200], "photo": None, "received": None, "signoff": None, "ts": time.time()}
         _ndv(o, shipments=d["shipments"] + [sh]); _set(o, "dispatched"); _log(s, o, "delivery.dispatched", user, {"i": sh["i"], "qty": sh["qty"], "courier": courier, "tracking": sh["tracking"]}); s.commit()
-        b = s.get(db.User, o.buyer_id); notify.send(b.phone, f"Order #{o.id}: {sh['qty']} pieces dispatched via {courier}{' (' + sh['tracking'] + ')' if sh['tracking'] else ''}. When they arrive, reply RECEIVED {o.id} <pieces you got>.")
+        b = s.get(db.User, o.buyer_id)
+        _queue_action(s, b, "delivery", o.id, "delivery_action", {
+            "order": o.id, "units": sh["qty"], "courier": courier,
+            "tracking": f" ({sh['tracking']})" if sh["tracking"] else "",
+        }, "action_title_delivery")
         return _view(s, o, user)
 
 def delivery_photo(user, oid, photo):

@@ -16,7 +16,7 @@ CMDS = {"buyer": {"status", "accept", "group", "help"},
         "seller": {"tasks", "earnings", "done", "sample", "checklist", "accept", "decline", "approve", "dispute", "help", "lang", "language"}}
 EARN_WORDS = ("kitna", "kamaya", "earnings", "paise", "earned", "कमाई", "कमाया")
 MENUS = {"buyer": [("new", "Place an order"), ("check", "Check my orders"), ("talk", "Talk to the group"), ("dashboard", "Open my dashboard")],
-         "leader": [("new", "New orders"), ("check", "Orders in progress"), ("review", "Review orders"), ("dashboard", "Open my dashboard")],
+         "leader": [("new", "New orders"), ("check", "Orders in progress"), ("samples", "Samples to check"), ("payments", "Payments to approve"), ("more", "More")],
          "seller": [("work", "My tasks"), ("report", "Report work"), ("earn", "My pay"),
                     ("talk", "Talk to my leader"), ("dashboard", "Open my dashboard")]}
 WORDS = [("check", ("check", "status", "existing")), ("earn", ("earn", "kitna", "kamai", "paise", "pay")), ("work", ("work", "task", "kaam", "काम")),
@@ -72,18 +72,25 @@ def _date(iso):
     except Exception: return None
 def _name(v):
     o = v["order"]; return (o.get("product") or "Order").strip().capitalize()
-def _line(v): return f"#{v['id']} {_name(v)} × {v['order']['qty']} - {STATUS.get(v['status'], v['status'])}"
-def _menu_text(role, lang="en"):
+def _line(v, lang="en"): return f"#{v['id']} {_name(v)} × {v['order']['qty']} - {i18n.status_label(v['status'], lang)}"
+def _menu_text(role, lang="en", user=None):
     key = {"buyer": "buyer_menu", "leader": "leader_menu", "seller": "member_menu"}[role]
+    if role == "leader" and user:
+        rows = svc.my_orders(user)
+        return i18n.t(key, lang,
+                      new=sum(x["status"] == "submitted" for x in rows),
+                      active=sum(x["status"] in ("accepted", "planned", "in_production", "payout_pending", "settled", "ready_for_delivery", "dispatched", "partially_delivered", "blocked") for x in rows),
+                      samples=sum(any(q.get("status") == "pending" for q in x.get("quality", [])) for x in rows),
+                      payments=sum(x["status"] == "payout_pending" for x in rows))
     return i18n.t(key, lang)
 
 def role_menu(user):
-    return _menu_text(user["role"], user.get("lang", "en"))
+    return _menu_text(user["role"], user.get("lang", "en"), user)
 
 def _welcome(u, returning=False):
     if u["role"] not in MENUS:
         return i18n.t("leader_menu", u.get("lang", "en"))
-    return _menu_text(u["role"], u.get("lang", "en"))
+    return _menu_text(u["role"], u.get("lang", "en"), u)
 def _choose(options, t):
     t = (t or "").strip().lower()
     if t.isdigit(): i = int(t) - 1; return options[i] if 0 <= i < len(options) else None
@@ -331,7 +338,12 @@ def _leader_do(u, phone, d, k, t):
     oid = d["oid"]
     if k == "later": _clear(phone); return f"Okay. Order #{oid} is on your dashboard. Send MENU to review it later."
     if k == "quote_own": return _go(phone, "quote_price", d, "What price per piece (in ₹) should I quote?")
-    return _quote(u, phone, oid, d["auto"] if k == "quote_auto" else None)
+    if k == "quote_auto":
+        order = _mine(u, oid); price = d["auto"]
+        total = _money(D(str(price)) * D(str(order["order"]["qty"])))
+        return _go(phone, "quote_confirm", {"oid": oid, "price": str(price), "total": total},
+                   i18n.t("quote_confirm", u["lang"], order=oid, price=price, total=total))
+    return _quote(u, phone, oid, None)
 
 def _quote(u, phone, oid, price):
     v = svc.quote(u, oid, price); _clear(phone)
@@ -344,11 +356,23 @@ def _mine(u, oid): return next((x for x in svc.my_orders(u) if x["id"] == oid), 
 def _step_quote_price(u, phone, st, t, w, media):
     n = _num(t)
     if not n: return "Please send just the price per piece in rupees, for example 85."
-    return _quote(u, phone, st["data"]["oid"], str(n))
+    oid = st["data"]["oid"]; order = _mine(u, oid)
+    if not order: return i18n.t("invalid_choice", u["lang"])
+    total = _money(D(str(n)) * D(str(order["order"]["qty"])))
+    return _go(phone, "quote_confirm", {"oid": oid, "price": str(n), "total": total},
+               i18n.t("quote_confirm", u["lang"], order=oid, price=n, total=total))
+
+def _step_quote_confirm(u, phone, st, t, w, media):
+    answer = (t or "").strip()
+    if answer == "1": return _quote(u, phone, st["data"]["oid"], st["data"]["price"])
+    if answer == "2": return _open(u, phone, st["data"]["oid"], "Okay, the quote was not sent.")
+    return i18n.t("invalid_choice", u["lang"]) + "\n" + i18n.t(
+        "quote_confirm", u["lang"], order=st["data"]["oid"],
+        price=st["data"]["price"], total=st["data"]["total"])
 
 # ---------- check an existing order ----------
 def _card(u, v):
-    o, st = v["order"], STATUS.get(v["status"], v["status"]); rows = [f"Order #{v['id']} - {_name(v)}", f"Status: {st}", f"Quantity: {o['qty']} pieces", f"Offered price: ₹{o['offered_price']} per piece"]
+    o, st = v["order"], i18n.status_label(v["status"], u["lang"]); rows = [f"Order #{v['id']} - {_name(v)}", f"Status: {st}", f"Quantity: {o['qty']} pieces", f"Offered price: ₹{o['offered_price']} per piece"]
     if v.get("quote"): rows.append(f"Quote: ₹{v['quote']} per piece")
     when = _date(o.get("delivery_date")); rows.append("Delivery by: " + (when or f"{o['deadline_days']} days from the order date"))
     if u["role"] == "buyer": return "\n".join(rows + ([f"Work completed: {v['progress_pct']}%"] if v.get("progress_pct") else []))
@@ -368,19 +392,34 @@ def _check(u, phone):
     if not rows:
         return _go(phone, "menu", {}, "You have no orders yet.\n1. Place a new order\n2. Check an existing order\nReply 9 for the menu.")
     if len(rows) == 1: _clear(phone); return _card(u, rows[0]) + "\n\nSend MENU for more options."
-    return _go(phone, "check_pick", {}, "Which order would you like to check? Reply with the order number:\n\n" + "\n".join(_line(v) for v in rows[:10]))
+    rows = rows[:10]
+    return _go(phone, "check_pick", {"ids": [v["id"] for v in rows]},
+               "Which order would you like to check?\n\n" + "\n".join(f"{i}. {_line(v, u['lang'])}" for i, v in enumerate(rows, 1)))
 
 def _step_check_pick(u, phone, st, t, w, media):
-    v = _pick_order(svc.my_orders(u), t)
-    if not v: return "I could not find that order number. Please reply with a number from the list, or send MENU."
+    ids = st["data"].get("ids", [])
+    number = _num(t)
+    if not number or not 1 <= number <= len(ids):
+        return i18n.t("invalid_choice", u["lang"]) + "\n" + "\n".join(f"{i}. #{oid}" for i, oid in enumerate(ids, 1))
+    v = _mine(u, ids[number - 1])
+    if not v: return i18n.t("invalid_choice", u["lang"])
     _clear(phone); return _card(u, v) + "\n\nSend MENU for more options."
 
 # ---------- leader: review and manage ----------
-def _review(u, phone):
+def _leader_orders(u, phone, bucket="all"):
     rows = svc.my_orders(u)
+    if bucket == "new": rows = [v for v in rows if v["status"] == "submitted"]
+    elif bucket == "active": rows = [v for v in rows if v["status"] in ("accepted", "planned", "in_production", "payout_pending", "settled", "ready_for_delivery", "dispatched", "partially_delivered", "blocked")]
+    elif bucket == "samples": rows = [v for v in rows if any(q.get("status") == "pending" for q in v.get("quality", []))]
+    elif bucket == "payments": rows = [v for v in rows if v["status"] == "payout_pending"]
     if not rows:
-        return _go(phone, "menu", {}, "There are no orders in your group yet.\n1. Place a new order\n2. Check an existing order\nReply 9 for the menu.")
-    return _go(phone, "review_pick", {}, "Orders in your group:\n\n" + "\n".join(_line(v) for v in rows[:10]) + "\n\nReply with an order number to open it, or send MENU.")
+        return _go(phone, "menu", {}, "There are no orders in this list right now. Send 9 for the menu.")
+    rows = rows[:10]
+    return _go(phone, "review_pick", {"ids": [v["id"] for v in rows]},
+               "Choose an order to open:\n\n" + "\n".join(f"{i}. {_line(v, u['lang'])}" for i, v in enumerate(rows, 1)))
+
+def _review(u, phone):
+    return _leader_orders(u, phone)
 
 def _actions(v):
     s = v["status"]; back = ("back", "Back to the order list")
@@ -408,8 +447,11 @@ def _open(u, phone, oid, extra=""):
     return _go(phone, "review_act", {"oid": oid, "opts": [k for k, _ in acts], "auto": sug}, (extra + "\n\n" if extra else "") + txt + f"\n\nWhat would you like to do?\n{_opts(acts)}")
 
 def _step_review_pick(u, phone, st, t, w, media):
-    v = _pick_order(svc.my_orders(u), t)
-    return _open(u, phone, v["id"]) if v else "I could not find that order number. Please reply with a number from the list, or send MENU."
+    ids = st["data"].get("ids", [])
+    number = _num(t)
+    if not number or not 1 <= number <= len(ids):
+        return i18n.t("invalid_choice", u["lang"]) + "\n" + "\n".join(f"{i}. #{oid}" for i, oid in enumerate(ids, 1))
+    return _open(u, phone, ids[number - 1])
 
 def _risk_text(r):
     head = f"{r['done']} of {r['needed']} pieces finished through every stage, {r['days_left']} day(s) left. Slowest stage: {r['slowest_stage']} ({r['per_day']} pieces/day). Projected {r['projected']}."
@@ -423,15 +465,59 @@ def _step_review_act(u, phone, st, t, w, media):
     if k == "quote_own": return _go(phone, "quote_price", {"oid": oid}, "What price per piece (in ₹) should I quote?")
     if k == "resolve": return _go(phone, "resolve_note", {"oid": oid}, "Please tell me how this dispute was resolved (a short note).")
     msg = ""
-    if k == "quote_auto": v = svc.quote(u, oid, d.get("auto")); msg = f"✅ Quote of ₹{v['quote']} per piece recorded." + (f" When the buyer agrees, choose 'Record that the buyer accepted'." if _on_behalf(oid) else " The buyer has been sent this quote.")
+    if k == "quote_auto":
+        order = _mine(u, oid); price = d.get("auto")
+        total = _money(D(str(price)) * D(str(order["order"]["qty"])))
+        return _go(phone, "quote_confirm", {"oid": oid, "price": str(price), "total": total},
+                   i18n.t("quote_confirm", u["lang"], order=oid, price=price, total=total))
     elif k == "accept_for_buyer": svc.accept_quote(u, oid); msg = "✅ Recorded: the buyer accepted the quote."
     elif k == "plan": svc.plan(u, oid); msg = "✅ A work plan is proposed below. Nothing starts until you approve it."
-    elif k == "start": svc.start(u, oid); msg = "✅ Production started. Every member has been sent her task."
+    elif k == "start":
+        order = _mine(u, oid); members = len({a["member"] for a in order.get("plan", {}).get("assignments", [])})
+        return _go(phone, "start_confirm", {"oid": oid, "members": members},
+                   i18n.t("start_confirm", u["lang"], order=oid, members=members))
     elif k == "progress": rows = (_mine(u, oid) or {}).get("progress", {}).get("rows", []); msg = "\n".join(f"{r['name']}: {r['stage']} {r['done']}/{r['units']}" for r in rows) or "No work has been planned yet."
     elif k == "risk": msg = _risk_text(svc.risk(u, oid, None))
-    elif k == "payout": p = svc.propose_payout(u, oid, None); msg = f"✅ Payout proposed, total ₹{p['payout']['total']}. Members will review it; a payout needs your approval and theirs."
-    elif k == "approve": p = svc.approve_payout(u, oid); msg = f"✅ Your approval is recorded. Order status: {p['status'].replace('_', ' ')}."
+    elif k == "payout":
+        preview = svc.payout_preview(u, oid)
+        lines = "\n".join(f"{line['name']} — {i18n.stage(line['stage'], u['lang'])}: {line['accepted']} accepted, {line['pending']} rework, ₹{line['total_expected']}" for line in preview["lines"])
+        return _go(phone, "payout_confirm", {"oid": oid},
+                   i18n.t("payout_confirm", u["lang"], order=oid, lines=lines, total=preview["total"]))
+    elif k == "approve":
+        order = _mine(u, oid); payout = order.get("payout") or {}
+        units = sum(int(line["accepted"]) + int(line.get("pending", 0)) for line in payout.get("lines", []))
+        return _go(phone, "payout_approve_confirm", {"oid": oid},
+                   i18n.t("leader_payout_confirm", u["lang"], order=oid,
+                          amount=payout.get("total", "0"), units=units))
     return _open(u, phone, oid, msg)
+
+def _step_start_confirm(u, phone, st, t, w, media):
+    oid = st["data"]["oid"]
+    if (t or "").strip() == "1":
+        svc.start(u, oid)
+        return _open(u, phone, oid, "✅ Production started. Every member has received a task choice.")
+    if (t or "").strip() == "2": return _open(u, phone, oid, "Okay, production has not started.")
+    return i18n.t("invalid_choice", u["lang"]) + "\n" + i18n.t(
+        "start_confirm", u["lang"], order=oid, members=st["data"]["members"])
+
+def _step_payout_confirm(u, phone, st, t, w, media):
+    oid = st["data"]["oid"]
+    if (t or "").strip() == "1":
+        proposal = svc.propose_payout(u, oid, None)
+        return _open(u, phone, oid, f"✅ Payout proposal sent for member review. Total: ₹{proposal['payout']['total']}.")
+    if (t or "").strip() == "2": return _open(u, phone, oid, "Okay, the payout was not proposed.")
+    preview = svc.payout_preview(u, oid)
+    lines = "\n".join(f"{line['name']} — {i18n.stage(line['stage'], u['lang'])}: {line['accepted']} accepted, {line['pending']} rework, ₹{line['total_expected']}" for line in preview["lines"])
+    return i18n.t("invalid_choice", u["lang"]) + "\n" + i18n.t(
+        "payout_confirm", u["lang"], order=oid, lines=lines, total=preview["total"])
+
+def _step_payout_approve_confirm(u, phone, st, t, w, media):
+    oid = st["data"]["oid"]
+    if (t or "").strip() == "1":
+        result = svc.approve_payout(u, oid)
+        return _open(u, phone, oid, f"✅ Your approval is recorded. Order status: {i18n.status_label(result['status'], u['lang'])}.")
+    if (t or "").strip() == "2": return _open(u, phone, oid, "Okay, payout approval was not recorded.")
+    return i18n.t("invalid_choice", u["lang"])
 
 def _step_resolve_note(u, phone, st, t, w, media):
     oid = st["data"]["oid"]; o = _mine(u, oid); i = next((k for k, x in enumerate((o or {}).get("disputes", [])) if x["open"]), None)
@@ -465,12 +551,14 @@ def _step_work_menu(u, phone, st, t, w, media):
         return {"accept": "There is no task waiting for you to accept.", "done": "None of your orders is in production yet.", "sample": "None of your orders is in production yet.", "decline": "You can only decline a task before production starts, and there is none like that now.", "issue": "You have no active task to report on."}[act] + " Reply 2 to check earnings or 9 for the menu."
     ids = list(dict.fromkeys(x["order_id"] for x in rows))
     if len(ids) == 1: return _after_order(u, phone, act, ids[0])
-    return _go(phone, "work_order", {"act": act, "ids": ids}, "Which order? Reply with the number: " + ", ".join(f"#{i}" for i in ids))
+    return _go(phone, "work_order", {"act": act, "ids": ids},
+               "Choose an order:\n" + "\n".join(f"{i}. Order #{oid}" for i, oid in enumerate(ids, 1)))
 
 def _step_work_order(u, phone, st, t, w, media):
-    d = st["data"]; n = _num((t or "").lstrip("#"))
-    if n not in d["ids"]: return "Please reply with one of these order numbers: " + ", ".join(f"#{i}" for i in d["ids"])
-    return _after_order(u, phone, d["act"], n)
+    d = st["data"]; n = _num(t)
+    if not n or not 1 <= n <= len(d["ids"]):
+        return i18n.t("invalid_choice", u["lang"]) + "\n" + "\n".join(f"{i}. Order #{oid}" for i, oid in enumerate(d["ids"], 1))
+    return _after_order(u, phone, d["act"], d["ids"][n - 1])
 
 def _step_work_pieces(u, phone, st, t, w, media):
     n = _num(t)
@@ -510,10 +598,24 @@ def _step_earn_reason(u, phone, st, t, w, media):
 # ---------- menu ----------
 def _step_menu(u, phone, st, t, w, media):
     k = _choose([x for x, _ in MENUS[u["role"]]], t)
-    if not k: return i18n.t("invalid_choice", u["lang"]) + "\n" + _menu_text(u["role"], u["lang"])
+    if not k: return i18n.t("invalid_choice", u["lang"]) + "\n" + _menu_text(u["role"], u["lang"], u)
     return _run(u, phone, k)
+
+def _step_leader_more(u, phone, st, t, w, media):
+    choice = (t or "").strip()
+    if choice == "1": return _run(u, phone, "dashboard")
+    if choice == "2": return _review(u, phone)
+    if choice == "9": return _menu(u, phone)
+    return i18n.t("invalid_choice", u["lang"]) + "\n" + i18n.t("leader_more", u["lang"])
+
 def _run(u, phone, k):
-    if k == "new": return _start_order(u, phone, "", None)
+    if k == "new":
+        return _leader_orders(u, phone, "new") if u["role"] == "leader" else _start_order(u, phone, "", None)
+    if u["role"] == "leader":
+        if k == "check": return _leader_orders(u, phone, "active")
+        if k == "samples": return _leader_orders(u, phone, "samples")
+        if k == "payments": return _leader_orders(u, phone, "payments")
+        if k == "more": return _go(phone, "leader_more", {}, i18n.t("leader_more", u["lang"]))
     if k == "report": return _work(u, phone)
     if k == "talk":
         group_id = u.get("group_id") or u.get("preferred_group_id")
@@ -581,14 +683,15 @@ def _menu(u, phone):
     _clear(phone); _save(phone, "menu", {})
     return _welcome(u)
 
-STEPS = {"menu": _step_menu, "buyer_name": _step_buyer_name, "details": _step_details, "missing": _step_missing, "confirm": _step_confirm, "edit": _step_edit,
+STEPS = {"menu": _step_menu, "leader_more": _step_leader_more, "buyer_name": _step_buyer_name, "details": _step_details, "missing": _step_missing, "confirm": _step_confirm, "edit": _step_edit,
          "group_pick": _step_group_pick, "repeat_confirm": _step_repeat_confirm, "expired": _step_expired, "cancel_confirm": _step_cancel_confirm,
+         "quote_confirm": _step_quote_confirm, "start_confirm": _step_start_confirm, "payout_confirm": _step_payout_confirm, "payout_approve_confirm": _step_payout_approve_confirm,
          "after_submit": _step_after_submit, "quote_price": _step_quote_price, "check_pick": _step_check_pick, "review_pick": _step_review_pick,
          "review_act": _step_review_act, "resolve_note": _step_resolve_note, "work_menu": _step_work_menu, "work_order": _step_work_order, "work_pieces": _step_work_pieces,
          "work_sample": _step_work_sample, "work_issue": _step_work_issue, "earn_act": _step_earn_act, "earn_reason": _step_earn_reason}
 FREE = {"buyer_name", "details", "missing", "edit", "work_issue", "earn_reason", "resolve_note", "work_sample"}     # steps where typed words are content, not commands
 
-ESCAPE = {"after_submit", "review_pick", "review_act", "check_pick", "work_menu", "work_order", "earn_act"}   # numbered-choice steps: a typed command still works
+ESCAPE = {"after_submit", "review_pick", "review_act", "check_pick", "work_menu", "work_order", "earn_act", "leader_more"}   # numbered-choice steps: a typed command still works
 
 def handle(u, phone, t, w, media):
     """Returns the reply, or None to let the typed-command handler answer (HELP, QUOTE 1, DONE 1 20 ... still work)."""

@@ -1,5 +1,29 @@
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700&family=Hind:wght@400;500;600&display=swap');
 :root {
+  color-scheme: light;
+  --ground: #f7f5ed;
+  --text: #263638;
+  --muted: #5e6c6d;
+  --card: #fffdf8;
+  --border: #e2ddd0;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --input-bg: #ffffff;
+  --header-bg: #fffdf8;
+  --button-text: #ffffff;
+  --ok-bg: #e2f3e9;
+  --ok-text: #155b3c;
+  --warn-bg: #fff0cc;
+  --warn-text: #714c00;
+  --error-bg: #fbe5e1;
+  --error-text: #8d2923;
+  --neutral-bg: #e9eee9;
+  --neutral-text: #344a45;
+  --shadow: 0 8px 24px #433b2412;
+  --radius: 16px;
+  --focus: #d27d18;
+}
+:root[data-theme="dark"] {
   color-scheme: dark;
   --ground: #0b1020;
   --text: #edf0ff;
@@ -8,6 +32,9 @@
   --border: #29365f;
   --accent: #7b8cff;
   --accent-strong: #586ef3;
+  --input-bg: #0e152b;
+  --header-bg: #10172d;
+  --button-text: #10162b;
   --ok-bg: #123b3d;
   --ok-text: #65dec3;
   --warn-bg: #3c2d17;
@@ -17,6 +44,5 @@
   --neutral-bg: #222c4a;
   --neutral-text: #d3dcf8;
   --shadow: 0 8px 24px #03071466;
-  --radius: 16px;
   --focus: #68e0cc;
 }

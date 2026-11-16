@@ -18,6 +18,24 @@
   --shadow: 0 16px 42px rgb(48 41 74 / 10%);
   --focus: #f3a712;
 }
+body[data-theme="dark"] {
+  background: #0b1020;
+  color: #edf0ff;
+}
+body[data-theme="dark"] .login-brand,
+body[data-theme="dark"] .login-title,
+body[data-theme="dark"] .login-card h2 { color: #edf0ff; }
+body[data-theme="dark"] .login-card {
+  border-color: #29365f;
+  background: #141c36;
+}
+body[data-theme="dark"] .login-role {
+  border-color: #29365f;
+  background: #141c36;
+}
+body[data-theme="dark"] .login-help,
+body[data-theme="dark"] .login-intro > .muted,
+body[data-theme="dark"] .login-role p { color: #a0add0; }
 
 body {
   position: relative;

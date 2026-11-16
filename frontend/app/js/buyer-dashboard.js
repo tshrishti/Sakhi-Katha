@@ -40,7 +40,7 @@ function buyerOrderCard(order) {
   const cancellable = ['submitted','quoted','accepted','planned'].includes(order.status);
   return `<article class="card buyer-order" data-order-id="${order.id}">
     <div class="dashboard-heading"><div><h3>Order #${order.id} · ${buyerSafe(order.order.product || 'Order')}</h3>
-      <p>${Number(order.order.qty)} pieces · ${buyerSafe(order.group)}</p></div>${chip(order.status)}</div>
+      <p>${Number(order.order.qty)} pieces · ${buyerSafe(order.group)}</p></div>${chip(order.status, order.status_label)}</div>
     <p>Delivery target: ${buyerDate(order.due_at)}${order.days_left == null ? '' : ` · ${order.days_left} day(s) left`}</p>
     <div class="buyer-progress" role="img" aria-label="${Number(order.progress_pct || 0)} percent of reported work complete"><span style="width:${Math.max(0,Math.min(100,Number(order.progress_pct||0)))}%"></span></div>
     <p>${Number(order.progress_pct || 0)}% work reported complete · progress is based on member reports</p>
@@ -94,7 +94,7 @@ function renderBuyerHome() {
 function renderBuyerOrders() {
   const orders = buyerData.orders;
   document.getElementById('buyer-panel').innerHTML = `<section class="card"><div class="dashboard-heading"><div><h2>My orders</h2><p class="muted">Only your order and delivery information is shown here.</p></div>
-    <select id="buyer-status-filter" aria-label="Filter orders" onchange="buyerFilterOrders(this.value)"><option value="">All statuses</option>${[...new Set(orders.map(order=>order.status))].map(status=>`<option value="${esc(status)}">${esc(status.replaceAll('_',' '))}</option>`).join('')}</select>
+    <select id="buyer-status-filter" aria-label="Filter orders" onchange="buyerFilterOrders(this.value)"><option value="">All statuses</option>${[...new Map(orders.map(order=>[order.status,order.status_label||order.status.replaceAll('_',' ')]))].map(([status,label])=>`<option value="${esc(status)}">${esc(label)}</option>`).join('')}</select>
   </div><div id="buyer-order-list" class="buyer-order-list">${orders.length ? orders.map(buyerOrderCard).join('') : '<p class="muted">No orders yet.</p>'}</div></section>`;
 }
 

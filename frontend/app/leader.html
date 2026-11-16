@@ -1,6 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Leader - Sakhi Khata</title><link rel="stylesheet" href="style.css?v=phase3b"></head><body><main id="m"></main><div id="toast" role="status"></div>
 <script src="common.js?v=phase3"></script><script src="js/tabs.js?v=phase3"></script><script src="js/live.js?v=phase3"></script><script>
 const RES={possible_defect:'Possible defect',met:'Looks OK',cannot_tell:'Cannot tell from photo'};
+const fitResults=Object.create(null);
 const ai=(q,oid,i)=>{const s=q.screening;if(!s)return '';
  const head='<div class="ai"><b>AI pre-check</b> <span class="muted">(suggestion only. You decide.)</span>';
  if(s.status!=='ok')return head+`<p class="${s.status==='unavailable'?'warn':''}">${esc(s.summary)} ${q.status==='pending'&&s.status==='unavailable'?`<button onclick="act('/leader/orders/${oid}/quality/${i}/rescreen','POST',{},load)">Try again</button>`:''}</p></div>`;
@@ -10,6 +11,17 @@ const ai=(q,oid,i)=>{const s=q.screening;if(!s)return '';
   +`<details><summary class="muted">All ${s.items.length} checks</summary><table>${s.items.map(x=>`<tr><td>${esc(x.criterion)}</td><td>${RES[x.result]}</td><td>${esc(x.confidence)}</td></tr>`).join('')}</table></details></div>`};
 const checklist=o=>`<details class="cl"><summary>Buyer's quality checklist (${(o.checklist||[]).length})</summary><p class="muted">The AI checks sample photos against this list. One point per line. Add anything the buyer told you, remove what does not apply.</p>
  <textarea id="cl${o.id}">${(o.checklist||[]).map(c=>esc(c.text)).join('\n')}</textarea><button onclick="saveCl(${o.id})">Save checklist</button></details>`;
+function fitCheckMarkup(o){
+ if(!['submitted','quoted'].includes(o.status))return '';
+ const result=fitResults[o.id];
+ if(!result)return `<section class="card"><h3>Order feasibility</h3><p>Check deadline and available skills before quoting. Material stock is not tracked.</p><button class="secondary" onclick="checkFit(${o.id})">Check order fit</button></section>`;
+ const summary=result.feasible?'Looks workable':'Needs a change or group review';
+ return `<section class="card"><h3>Order feasibility</h3><p>${chip(result.feasible?'settled':'blocked')} ${esc(summary)}</p>
+ <p><b>Materials:</b> Stock is not tracked yet.</p><p><b>Deadline, capacity and skills:</b> ${result.feasible?'The current plan appears workable.':'Review the issues below with the group.'}</p>
+ ${(result.issues||[]).length?`<ul>${result.issues.map(issue=>`<li>${esc(issue)}</li>`).join('')}</ul>`:''}
+ ${(result.options||[]).length?`<p><b>Options to discuss</b></p><ul>${result.options.map(option=>`<li>${esc(option.label)}</li>`).join('')}</ul>`:''}
+ <p class="muted">This is advice only. The group decides before sending a quote.</p><button class="secondary" onclick="checkFit(${o.id})">Check again</button></section>`;
+}
 const card=o=>{const p=o.price,pl=o.plan,po=o.payout;let a='';
  if(o.status==='submitted'||o.status==='quoted')a=`<div class="row"><input id="c${o.id}" placeholder="Counter Rs/pc (blank = floor-based)" size="26"><button onclick="act('/leader/orders/${o.id}/quote','POST',{counter:$('#c${o.id}').value},load)">${o.status==='quoted'?'Re-quote':'Send quote'}</button></div>`;
  if(o.status==='accepted')a=`<button onclick="act('/leader/orders/${o.id}/plan','POST',{},load)">Build fair plan</button>`;
@@ -29,6 +41,8 @@ const card=o=>{const p=o.price,pl=o.plan,po=o.payout;let a='';
  if(['submitted','quoted','accepted','planned'].includes(o.status))a+=` <button class="red" onclick="cancelO(${o.id})">Cancel order</button>`;
  return `<div class="card"><div class="row"><b>#${o.id}</b> ${chip(o.status)} <span>${o.order.qty} pcs @ Rs ${o.order.offered_price}, ${o.order.deadline_days} days, ${esc(o.order.colour||'')}</span></div>
  ${o.unclear.length?`<p class="warn">Check with buyer: ${o.unclear.map(esc).join('; ')}</p>`:''}
+ ${(o.decline_details||[]).length?`<section class="card"><h3>Tasks declined</h3>${o.decline_details.map(item=>`<p>${esc(item.name)} · ${esc(item.stage)} · ${esc(item.reason||'No reason recorded')}</p>`).join('')}</section>`:''}
+ ${fitCheckMarkup(o)}
  ${p?`<p class="${p.loss_making?'bad':''}">Floor Rs ${esc(p.per_unit.floor)}/pc. At the offer, women earn Rs ${esc(p.effective_hourly_at_offer)}/hr vs target Rs ${esc(p.target_hourly)}/hr (${esc(p.pay_gap_pct)}% less). Quote: Rs ${esc(o.quote)}</p>`:''}
  ${pl&&o.status==='planned'?`<table>${pl.assignments.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.stage)} x${x.units}</td><td>Rs ${esc(x.expected_pay)}</td><td>${(o.task_accepted||[]).includes(x.member)?'<span class="ok">accepted</span>':'<span class="muted">not yet accepted</span>'}</td><td class="muted">${esc(x.why)}</td></tr>`).join('')}</table>${pl.issues.length?`<p class="warn">Risk: ${pl.issues.map(esc).join('; ')}</p>`:''}${(pl.options||[]).length?`<div class="warn"><b>Not feasible as ordered. Options:</b><ul>${pl.options.map(x=>`<li>${esc(x.label)}</li>`).join('')}</ul><span class="muted">Agree one with the buyer, then re-quote or replan.</span></div>`:''}`:''}${a}${['accepted','planned','in_production'].includes(o.status)?checklist(o):''}</div>`};
 let overviewData=null, teamData=[], rateCardsData=null, buyersData=null, alertsData=null, leavesData=null, noticesData=null, extraLoading={}, liveClient=null, tabsReady=false, orderView='list';
@@ -344,6 +358,7 @@ function dphoto(id){const f=document.createElement('input');f.type='file';f.acce
 function saveCl(id){act('/leader/orders/'+id+'/checklist','PUT',{items:$('#cl'+id).value.split('\n')},load)}
 function rework(id,n){const k=prompt('How many pieces need rework?');if(k)act('/leader/orders/'+id+'/quality','POST',{member:Number(n),decision:'rework',rework:+k,reason:prompt('Reason')||''},load)}
 function risk(id){const d=prompt('Days left to the deadline?');if(d!==null)act('/leader/orders/'+id+'/risk','POST',{days_left:d},load)}
+async function checkFit(id){try{fitResults[id]=await api('/leader/orders/'+Number(id)+'/review');await showDrawer(Number(id));}catch(error){toast(error.message,1)}}
 function addM(){act('/leader/members','POST',{name:$('#n').value,phone:$('#p').value,skills:$('#s').value.split(',').map(x=>x.trim()).filter(Boolean),capacity:+$('#k').value},load)}
 
 const _rcTxt=c=>`${esc(c.label)} v${c.version||0} ${c.source==='default'?'(template default)':'(group approved)'}: `+c.stages.map(s=>`${esc(s.name)} Rs ${s.rate} x${s.workers}`).join(', ')+` | material Rs ${c.cost.material}, ${c.cost.minutes} min, Rs ${c.cost.hourly}/hr, overhead ${c.cost.overhead_pct}%, margin ${c.cost.margin_pct}%`;

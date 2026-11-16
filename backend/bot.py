@@ -284,6 +284,147 @@ def _onboard(phone, t, msg_id):
         _onboard_clear(phone)
         return i18n.t("join_waiting", lang)
 
+def _pending_state(phone):
+    with db.S() as s:
+        state = s.get(db.ChatState, phone)
+        return dict(state.pending_action or {}) if state else {}
+
+def _save_pending(phone, pending):
+    with db.S() as s:
+        state = s.get(db.ChatState, phone) or db.ChatState(
+            phone=phone, history=[], lang="en", updated_at=time.time()
+        )
+        state.pending_action = pending or None
+        state.updated_at = time.time()
+        s.merge(state)
+        s.commit()
+
+def _pending_prompt(user, items):
+    lang = user["lang"]
+    lines = [f"{i}. {i18n.t(item['title_key'], lang, **item.get('title_args', {}))}"
+             for i, item in enumerate(items, 1)]
+    return i18n.t("multiple_actions", lang, items="\n".join(lines))
+
+def _pending_remove(user, phone, item):
+    pending = _pending_state(phone)
+    items = [entry for entry in pending.get("items", [])
+             if not (entry.get("kind") == item.get("kind") and entry.get("id") == item.get("id"))]
+    _save_pending(phone, {"type": "actions", "items": items, "selected": None} if items else None)
+    return _pending_prompt(user, items) if items else ""
+
+def _pending_action(user, phone, text):
+    """Resolve persisted WhatsApp choices before routing a numeric reply to a menu."""
+    state = convo._load(phone)
+    if state and state.get("step") not in (None, "menu"):
+        return None
+    pending = _pending_state(phone)
+    items = pending.get("items", [])
+    if not items:
+        return None
+    word = (text or "").strip().lower()
+    if word in ("9", "menu", "help", "0", "back"):
+        return None
+    selected = pending.get("selected")
+    if selected and selected.get("awaiting") == "reason":
+        if not word:
+            return i18n.t("ask_pay_problem", user["lang"], order=selected["id"])
+        svc.dispute(user, selected["id"], text)
+        extra = _pending_remove(user, phone, selected)
+        return i18n.t("disputed", user["lang"]) + (("\n" + extra) if extra else "")
+    if selected and selected.get("awaiting") == "pieces":
+        if not word.isdigit():
+            return i18n.t("invalid_choice", user["lang"]) + "\n" + i18n.t("ask_received", user["lang"], order=selected["id"])
+        result = svc.signoff(user, selected["id"], int(word))
+        delivery = result["delivery"]
+        extra = _pending_remove(user, phone, selected)
+        return i18n.t("delivery_received", user["lang"], order=selected["id"],
+                       received=delivery["delivered"], ordered=delivery["ordered"],
+                       status=i18n.status_label(result["status"], user["lang"])) + (("\n" + extra) if extra else "")
+    if not word.isdigit():
+        return None
+    if selected is None and len(items) > 1:
+        index = int(word) - 1
+        if not 0 <= index < len(items):
+            return i18n.t("invalid_choice", user["lang"]) + "\n" + _pending_prompt(user, items)
+        selected = dict(items[index])
+        pending["selected"] = selected
+        _save_pending(phone, pending)
+        return i18n.action_text(selected, user["lang"])
+    if selected is None:
+        selected = items[0]
+    choice = int(word)
+    kind, oid = selected["kind"], int(selected["id"])
+    if kind == "quote":
+        if choice == 1:
+            svc.accept_quote(user, oid)
+            extra = _pending_remove(user, phone, selected)
+            return i18n.t("quote_accepted", user["lang"]) + (("\n" + extra) if extra else "")
+        if choice == 2:
+            group_id = user.get("preferred_group_id") or svc.preferred_group(user)
+            delivered = svc.handoff(user, group_id, "The buyer asked to discuss the quote.")
+            extra = _pending_remove(user, phone, selected)
+            response = i18n.t("talk_requested" if delivered else "talk_unavailable", user["lang"])
+            return response + (("\n" + extra) if extra else "")
+        if choice == 3:
+            svc.cancel(user, oid, "Cancelled by buyer")
+            extra = _pending_remove(user, phone, selected)
+            return i18n.t("order_cancelled", user["lang"], order=oid) + (("\n" + extra) if extra else "")
+        return i18n.t("invalid_choice", user["lang"]) + "\n" + i18n.action_text(selected, user["lang"])
+    if kind == "task":
+        if choice == 1:
+            svc.accept_task(user, oid)
+            response = i18n.t("task_accepted", user["lang"], o=oid)
+        elif choice == 2:
+            svc.decline(user, oid)
+            response = i18n.t("declined", user["lang"])
+        else:
+            return i18n.t("invalid_choice", user["lang"]) + "\n" + i18n.action_text(selected, user["lang"])
+        extra = _pending_remove(user, phone, selected)
+        return response + (("\n" + extra) if extra else "")
+    if kind == "payout":
+        if choice == 1:
+            result = svc.approve_payout(user, oid)
+            extra = _pending_remove(user, phone, selected)
+            response = i18n.t("thanks", user["lang"], st=i18n.status_label(result["status"], user["lang"]))
+            return response + (("\n" + extra) if extra else "")
+        if choice == 2:
+            selected["awaiting"] = "reason"
+            pending["selected"] = selected
+            _save_pending(phone, pending)
+            return i18n.t("ask_pay_problem", user["lang"], order=oid)
+        return i18n.t("invalid_choice", user["lang"]) + "\n" + i18n.action_text(selected, user["lang"])
+    if kind == "delivery":
+        if choice == 1:
+            selected["awaiting"] = "pieces"
+            pending["selected"] = selected
+            _save_pending(phone, pending)
+            return i18n.t("ask_received", user["lang"], order=oid)
+        if choice == 2:
+            extra = _pending_remove(user, phone, selected)
+            return i18n.t("action_cancelled", user["lang"]) + (("\n" + extra) if extra else "")
+    if kind == "join_request":
+        if choice in (1, 2):
+            result = svc.resolve_join_request(user, oid, choice == 1)
+            extra = _pending_remove(user, phone, selected)
+            key = "join_request_approved" if result["status"] == "approved" else "join_request_rejected"
+            return i18n.t(key, user["lang"], order=oid) + (("\n" + extra) if extra else "")
+    if kind in ("leader_order", "leader_risk", "leader_sample"):
+        if choice == 1:
+            _pending_remove(user, phone, selected)
+            return convo._open(user, phone, oid)
+        if choice == 2:
+            extra = _pending_remove(user, phone, selected)
+            return i18n.t("action_cancelled", user["lang"]) + (("\n" + extra) if extra else "")
+    if kind == "leader_payout":
+        if choice == 1:
+            result = svc.approve_payout(user, oid)
+            extra = _pending_remove(user, phone, selected)
+            return i18n.t("thanks", user["lang"], st=i18n.status_label(result["status"], user["lang"])) + (("\n" + extra) if extra else "")
+        if choice == 2:
+            extra = _pending_remove(user, phone, selected)
+            return i18n.t("action_cancelled", user["lang"]) + (("\n" + extra) if extra else "")
+    return None
+
 def handle(sender, text, msg_id=None, media=None):
     if msg_id:
         if msg_id in SEEN: return None                       # WhatsApp may redeliver: act once
@@ -345,6 +486,12 @@ def handle(sender, text, msg_id=None, media=None):
         result = svc.leader_resolve_leave(u, int(w[1]), "approved", " ".join(t.split()[2:]))
         return f"Leave request #{result['id']} approved."
     try:
+        try:
+            pending_reply = _pending_action(u, phone, t)
+        except svc.Err as e:
+            log.warning("pending WhatsApp action failed (code=%s): %s", e.code, e.msg, exc_info=True)
+            return i18n.t("try_again", u["lang"])
+        if pending_reply is not None: return pending_reply
         r = convo.handle(u, phone, t, w, media)                                   # guided conversation first; typed commands remain the fallback
         if r is not None: return r
     except svc.Err as e:
