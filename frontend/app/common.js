@@ -24,7 +24,7 @@ async function api(p,m='GET',b){
 function toast(t,bad){const e=$('#toast')||document.body.appendChild(Object.assign(document.createElement('div'),{id:'toast'}));
   e.textContent=t;e.style.display='block';e.style.borderColor=bad?'#ff5d73':'#5dffc4';clearTimeout(e.t);e.t=setTimeout(()=>e.style.display='none',3500)}
 async function act(path,method='POST',body={},reload){try{await api(path,method,body);toast('Done');if(reload)await reload()}catch(e){toast(e.message,1)}}
-const chip=s=>`<span class="chip ${esc(s)}">${esc(String(s).replace('_',' '))}</span>`;
+const chip=(s,label)=>`<span class="chip ${esc(s)}">${esc(label||String(s).replaceAll('_',' '))}</span>`;
 async function logout(){await api('/auth/logout','POST');location='/app/login.html?v=phase3'}
 function applyTheme(){
   const theme=localStorage.getItem('sk_theme')==='dark'?'dark':'light';

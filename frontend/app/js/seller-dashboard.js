@@ -137,7 +137,7 @@ function renderMemberTasks() {
     <div class="order-list">${filtered.length ? filtered.map(task => `<article class="card" data-order-id="${task.order_id}">
       <div class="dashboard-heading"><div><h3>Order #${task.order_id} · ${esc(task.product)} × ${task.quantity}</h3>
         <p>${esc(task.stage)} · ${task.done}/${task.units} pieces · ${memberDate(task.due_at)}${task.days_left == null ? '' : ` · ${task.days_left} day(s) left`}</p></div>
-        ${chip(task.quality?.status || task.status)}</div>
+        ${task.quality ? chip(task.quality.status, task.quality.status_label) : chip(task.status, task.status_label)}</div>
       <p>Rate: ${memberMoney(task.rate)} per piece · Expected pay: ${memberMoney(task.expected_pay)}</p>
       <p><b>Why you got this task:</b> ${esc(task.why)}</p>
       ${task.checklist?.length ? `<details><summary>What a good piece looks like</summary><ul>${task.checklist.map(item => `<li>${esc(item)}</li>`).join('')}</ul></details>` : ''}
@@ -170,7 +170,7 @@ function renderMemberEarnings() {
     <article class="kpi"><strong>${approved.length}</strong><span>Approved order(s)</span></article>
   </section><section class="card"><h2>My pay slips</h2>
     ${pays.length ? pays.map(entry => `<article class="card pay-slip" data-order-id="${entry.order_id}">
-      <div class="dashboard-heading"><h3>Order #${entry.order_id} · ${esc(entry.line.stage)}</h3>${chip(entry.status)}</div>
+      <div class="dashboard-heading"><h3>Order #${entry.order_id} · ${esc(entry.line.stage)}</h3>${chip(entry.status, entry.status_label)}</div>
       <p>${entry.line.accepted} accepted × ${memberMoney(entry.line.rate)} = <b>${memberMoney(entry.line.paid)}</b></p>
       <p>${entry.line.pending} piece(s) waiting for rework approval · ${memberMoney(entry.line.pending_amount)}</p>
       <p><b>Total expected: ${memberMoney(entry.line.total_expected)}</b></p><p>${esc(entry.explain)}</p>

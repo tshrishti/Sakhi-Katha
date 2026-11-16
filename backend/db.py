@@ -61,7 +61,7 @@ class JoinRequest(Base):
     __tablename__ = "join_requests"
     id = Column(Integer, primary_key=True); phone = Column(String, nullable=False); name = Column(String, nullable=False)
     group_id = Column(Integer, nullable=False); skill = Column(String); lang = Column(String, default="en")
-    status = Column(String, nullable=False, default="pending"); created = Column(Float, nullable=False)
+    status = Column(String, nullable=False, default="pending"); created = Column(Float, nullable=False); consent_at = Column(Float)
 
 class RateCard(Base):                  # per-group, versioned; status: proposed | active | superseded | rejected
     __tablename__ = "rate_cards"
@@ -155,4 +155,7 @@ def ensure_columns():
             with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN preferred_group_id INTEGER"))
         if "last_active_at" not in user_columns:
             with engine.begin() as c: c.execute(text("ALTER TABLE users ADD COLUMN last_active_at FLOAT"))
+        join_request_columns = {c["name"] for c in inspect(engine).get_columns("join_requests")}
+        if "consent_at" not in join_request_columns:
+            with engine.begin() as c: c.execute(text("ALTER TABLE join_requests ADD COLUMN consent_at FLOAT"))
     except Exception: pass
