@@ -418,8 +418,16 @@ def submit_order(user, group_id, text, pre=None):
         data["rate_card"] = ratecards.active(s, g.id, data["product_key"])
         s.add(o); s.flush(); _log(s, o, "order.submitted", user, {**od, "rate_card": {"product": data["rate_card"]["product"], "version": data["rate_card"]["version"]}}); s.commit()
         if user["role"] != "leader":
-            what = f"{od.get('product') or 'order'} " if od.get("buyer_name") or od.get("product") else ""
-            _tell(s, g.id, "leader", f"New order #{o.id}{' from ' + od['buyer_name'] if od.get('buyer_name') else ''}: {what}{od['qty']} pcs at Rs {od['offered_price']}, {od['deadline_days']} days. Send QUOTE {o.id}, or send MENU to review it.")
+            leaders = s.scalars(select(db.User).where(
+                db.User.group_id == g.id, db.User.role == "leader", db.User.active == True
+            ))  # noqa: E712
+            for leader in leaders:
+                notify.send(leader.phone, i18n.t(
+                    "new_order_notice", leader.lang or "en",
+                    order=o.id, buyer=od.get("buyer_name") or user.get("name") or "Buyer",
+                    qty=od["qty"], product=od.get("product") or defaults.DEFAULT_PRODUCT,
+                    price=od["offered_price"], days=od["deadline_days"],
+                ))
         return _view(s, o, user)
 def my_orders(user):
     with db.S() as s:
@@ -1225,11 +1233,12 @@ def register_self(phone, name, role, skill=None, lang="en"):
         s.add(u); s.flush(); LED.append("consent.recorded", {"purpose": "order processing and earnings records", "via": "whatsapp"}, f"{u.role}:{u.id}", s=s); s.commit()
         return {"id": u.id, "name": u.name, "role": u.role}
 
-def submit_join_request(phone, name, skill, lang, code):
-    """Create a pending member request only for a valid group invite code."""
+def submit_join_request(phone, name, skill, lang, code, consent=False):
+    """Create a pending member request only after consent and valid invite-code checks."""
     from auth import norm
     phone = norm(phone)
     code = str(code or "").strip()
+    if not consent: raise Err(422, "Consent is required before requesting group membership")
     with db.S() as s:
         invite = s.scalars(select(db.GroupInvite).where(db.GroupInvite.code == code, db.GroupInvite.active == True)).first()  # noqa: E712
         if not invite: raise Err(422, "That group code was not recognized. Ask your leader for the current code.")
@@ -1238,8 +1247,12 @@ def submit_join_request(phone, name, skill, lang, code):
         pending = s.scalars(select(db.JoinRequest).where(db.JoinRequest.phone == phone, db.JoinRequest.status == "pending")).first()
         if pending: raise Err(409, "Your request is already waiting for a leader.")
         request = db.JoinRequest(phone=phone, name=str(name).strip()[:40] or "Member", group_id=invite.group_id,
-                                 skill=str(skill or "")[:40], lang=lang, status="pending", created=time.time())
+                                 skill=str(skill or "")[:40], lang=lang, status="pending",
+                                 created=time.time(), consent_at=time.time())
         s.add(request); s.flush()
+        LED.append("consent.recorded", {"purpose": "work and pay visibility", "via": "whatsapp",
+                                        "request_id": request.id},
+                   f"join_request:{request.id}", s=s)
         leaders = list(s.scalars(select(db.User).where(db.User.group_id == invite.group_id, db.User.role == "leader", db.User.active == True)))  # noqa: E712
         for leader in leaders:
             state = s.get(db.ChatState, leader.phone) or db.ChatState(phone=leader.phone, updated_at=time.time())
@@ -1250,7 +1263,8 @@ def submit_join_request(phone, name, skill, lang, code):
             state.updated_at = time.time()
             s.merge(state)
             if len(ids) == 1:
-                notify.send(leader.phone, f"Join request #{request.id}: {request.name} wants to join with skill {request.skill or 'not specified'}. Reply 1 to approve or 2 to reject.")
+                notify.send(leader.phone, i18n.t("leader_join_request", leader.lang,
+                                                 name=request.name, skill=i18n.stage(request.skill, leader.lang) or "not specified"))
         s.commit()
         return {"ok": True, "request_id": request.id, "group_id": invite.group_id}
 
@@ -1273,6 +1287,12 @@ def resolve_join_request(user, request_id, approve):
             member = db.User(phone=request.phone, name=request.name, role="seller", group_id=request.group_id,
                              skills=[request.skill] if request.skill else [], capacity=30, active=True, lang=request.lang)
             s.add(member); s.flush()
+            member_state = s.get(db.ChatState, request.phone) or db.ChatState(
+                phone=request.phone, updated_at=time.time()
+            )
+            member_state.step, member_state.data = "menu", {}
+            member_state.lang, member_state.updated_at = request.lang, time.time()
+            s.merge(member_state)
             LED.append("member.join_approved", {"request_id": request.id, "skill": request.skill}, f"leader:{user['id']}", s=s)
             request.status = "approved"
             notify.send(request.phone, i18n.t("join_approved", request.lang, name=request.name))
@@ -1289,7 +1309,8 @@ def resolve_join_request(user, request_id, approve):
             if ids:
                 following = s.get(db.JoinRequest, ids[0])
                 if following and following.status == "pending":
-                    notify.send(leader.phone, f"Join request #{following.id}: {following.name} wants to join with skill {following.skill or 'not specified'}. Reply 1 to approve or 2 to reject.")
+                    notify.send(leader.phone, i18n.t("leader_join_request", leader.lang,
+                                                     name=following.name, skill=i18n.stage(following.skill, leader.lang) or "not specified"))
         s.commit()
         return {"ok": True, "status": request.status, "name": request.name}
 

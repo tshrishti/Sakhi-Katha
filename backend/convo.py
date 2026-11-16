@@ -15,11 +15,14 @@ CMDS = {"buyer": {"status", "accept", "group", "help"},
         "leader": {"orders", "quote", "plan", "start", "pass", "rework", "risk", "progress", "checklist", "payout", "approve", "resolve", "accept", "join", "help"},
         "seller": {"tasks", "earnings", "done", "sample", "checklist", "accept", "decline", "approve", "dispute", "help", "lang", "language"}}
 EARN_WORDS = ("kitna", "kamaya", "earnings", "paise", "earned", "कमाई", "कमाया")
-MENUS = {"buyer": [("new", "Place a new order"), ("check", "Check an existing order")],
-         "leader": [("new", "Place a new order for a buyer"), ("check", "Check an existing order"), ("review", "Review orders waiting for me")],
-         "seller": [("work", "Manage my assigned work"), ("earn", "Check my earnings")]}
+MENUS = {"buyer": [("new", "Place an order"), ("check", "Check my orders"), ("talk", "Talk to the group"), ("dashboard", "Open my dashboard")],
+         "leader": [("new", "New orders"), ("check", "Orders in progress"), ("review", "Review orders"), ("dashboard", "Open my dashboard")],
+         "seller": [("work", "My tasks"), ("report", "Report work"), ("earn", "My pay"),
+                    ("talk", "Talk to my leader"), ("dashboard", "Open my dashboard")]}
 WORDS = [("check", ("check", "status", "existing")), ("earn", ("earn", "kitna", "kamai", "paise", "pay")), ("work", ("work", "task", "kaam", "काम")),
-         ("review", ("review", "manage", "pending")), ("new", ("order", "new", "place", "naya", "नया"))]
+         ("review", ("review", "manage", "pending")), ("new", ("order", "new", "place", "naya", "नया")),
+         ("report", ("report", "done", "pieces")), ("talk", ("talk", "person", "leader", "group")),
+         ("dashboard", ("dashboard", "web", "login"))]
 STATUS = {"submitted": "waiting for the leader's quote", "quoted": "quote sent, waiting for the buyer", "accepted": "accepted, needs a work plan",
           "planned": "work plan ready for approval", "in_production": "in production", "payout_pending": "payout waiting for approvals", "settled": "paid, packing next", "ready_for_delivery": "packed, ready for delivery", "dispatched": "on the way, confirm when it arrives", "partially_delivered": "part delivered, rest still to come", "closed": "delivered and closed", "blocked": "on hold", "cancelled": "cancelled"}
 REQUIRED = [("product", "What product is it? (for example, cloth bags)", None), ("qty", "How many pieces do you need?", "{n} pieces"),
@@ -70,28 +73,17 @@ def _date(iso):
 def _name(v):
     o = v["order"]; return (o.get("product") or "Order").strip().capitalize()
 def _line(v): return f"#{v['id']} {_name(v)} × {v['order']['qty']} - {STATUS.get(v['status'], v['status'])}"
-def _menu_text(role): return "\n".join(f"{i}. {lab}" for i, (_, lab) in enumerate(MENUS[role], 1))
+def _menu_text(role, lang="en"):
+    key = {"buyer": "buyer_menu", "leader": "leader_menu", "seller": "member_menu"}[role]
+    return i18n.t(key, lang)
+
+def role_menu(user):
+    return _menu_text(user["role"], user.get("lang", "en"))
+
 def _welcome(u, returning=False):
-    role, name = u["role"], (u.get("name") or "").split()[0]
-    hello = f"Namaste {name}." if name else "Namaste."
-    if role == "buyer":
-        rows = svc.my_orders(u)
-        active = next((o for o in rows if o["status"] not in ("closed", "cancelled")), None)
-        status = f" Order #{active['id']} is {active['progress_pct']}% done." if active and active.get("progress_pct") else ""
-        count = status or (f" You have {len(rows)} order{'s' if len(rows) != 1 else ''}." if rows else "")
-    elif role == "leader":
-        orders = svc.my_orders(u)
-        needs = sum(o["status"] in ("submitted", "planned", "payout_pending") for o in orders)
-        count = f" {needs} order{'s' if needs != 1 else ''} need you."
-    elif role == "seller":
-        tasks = svc.tasks(u)
-        task_count = sum(t["status"] in ("planned", "in_production") for t in tasks)
-        count = f" You have {task_count} task{'s' if task_count != 1 else ''}."
-    else:
-        count = " Use the programme dashboard for aggregate reports."
-    intro = f"{hello}{count}" if returning else f"{hello} Welcome to Sakhi Khata.{count}"
-    menu = _menu_text(role) if role in MENUS else ""
-    return (intro + (f"\n{menu}" if menu else ""))[:160]
+    if u["role"] not in MENUS:
+        return i18n.t("leader_menu", u.get("lang", "en"))
+    return _menu_text(u["role"], u.get("lang", "en"))
 def _choose(options, t):
     t = (t or "").strip().lower()
     if t.isdigit(): i = int(t) - 1; return options[i] if 0 <= i < len(options) else None
@@ -216,10 +208,10 @@ def _start_order(u, phone, t, media):
                 if len(groups) > 1 and chosen not in {g["id"] for g in groups}:
                     return _group_prompt(phone, d, groups)
                 return _go(phone, "details", d, err + "\n\nPlease type the order details instead. Reply 0 to go back or 9 for the menu.")
-            _go(phone, "buyer_name", d, ""); return err + "\n\nFirst, please tell me the buyer's name or business name."
+            _go(phone, "buyer_name", d, ""); return err + "\n\nFirst, who is the buyer (person or business)?"
         d["parts"], d["evidence"] = [txt], ev
     if u["role"] == "buyer": return _start_for_group(u, phone, d)
-    return _go(phone, "buyer_name", d, "Sure! Let's create a new order.\n\nFirst, please tell me the buyer's name or business name.")
+    return _go(phone, "buyer_name", d, "Sure! Let's create a new order.\n\nFirst, who is the buyer (person or business)?")
 
 def _step_buyer_name(u, phone, st, t, w, media):
     d = st["data"]; name = (t or "").strip()[:60]
@@ -324,7 +316,7 @@ def _place(u, phone, d, group_id=None):
     v = svc.submit_order(u, group_id, "\n".join(d.get("parts", [])), pre={"order": o, "unclear": d.get("unclear", []), "evidence": d.get("evidence")})
     if u["role"] != "leader":
         _clear(phone)
-        return f"✅ Order #{v['id']} is confirmed and sent to {v['group']}.\n\nThe SHG leader will check the price and the work plan, and you will get a quote here. Send STATUS or MENU any time."
+        return i18n.t("order_placed", u["lang"], order=v["id"], group=v["group"])
     r = svc.review(u, v["id"]); block, under, counter = _pricing_block(r, o["offered_price"])
     opts = ([("quote_auto", f"Send a counteroffer of ₹{counter} per piece")] if under else [("quote_auto", f"Accept the offered price (send quote ₹{o['offered_price']})")]) + [("quote_own", "Send a quote at my own price"), ("later", "Review it later")]
     return _go(phone, "after_submit", {"oid": v["id"], "opts": [k for k, _ in opts], "auto": str(counter if under else o["offered_price"])},
@@ -518,10 +510,20 @@ def _step_earn_reason(u, phone, st, t, w, media):
 # ---------- menu ----------
 def _step_menu(u, phone, st, t, w, media):
     k = _choose([x for x, _ in MENUS[u["role"]]], t)
-    if not k: return "I did not understand that. Please reply with a number:\n\n" + _menu_text(u["role"])
+    if not k: return i18n.t("invalid_choice", u["lang"]) + "\n" + _menu_text(u["role"], u["lang"])
     return _run(u, phone, k)
 def _run(u, phone, k):
     if k == "new": return _start_order(u, phone, "", None)
+    if k == "report": return _work(u, phone)
+    if k == "talk":
+        group_id = u.get("group_id") or u.get("preferred_group_id")
+        if not svc.handoff(u, group_id, "A user asked to talk with their group."):
+            return i18n.t("talk_unavailable", u["lang"])
+        return i18n.t("talk_requested", u["lang"])
+    if k == "dashboard":
+        link = svc.issue_magic_link(u["phone"])
+        message = i18n.t("dashboard_link", u["lang"])
+        return message + "\n" + link["url"] if link.get("url") else i18n.t("dashboard_unavailable", u["lang"])
     return {"check": _check, "review": _review, "work": _work, "earn": _earn}[k](u, phone)
 
 def _step_expired(u, phone, st, t, w, media):
@@ -595,7 +597,7 @@ def handle(u, phone, t, w, media):
     kind = (media or {}).get("kind")
     active = st and st.get("step")
     if active == "expired": return _step_expired(u, phone, st, t, w, media)
-    if word in ("menu", "9"): return _menu(u, phone)
+    if word in ("menu", "9", "help"): return _menu(u, phone)
     if word in ("0", "back"): return _back(u, phone, st) if active else _menu(u, phone)
     if u["role"] == "buyer" and " ".join((t or "").lower().split()) in ("change group", "group change"):
         if active and active != "menu": return "Please finish this step or reply 9 for the menu before changing groups."

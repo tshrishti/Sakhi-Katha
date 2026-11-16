@@ -1,14 +1,13 @@
 """WhatsApp commands for buyers, leaders and members. Same service layer and permissions as the dashboards.
 Like MaaSakhi: short messages, the number identifies the user, language is chosen on first contact, photos and voice notes work.
 Unknown numbers get nothing unless OPEN_REGISTRATION=1 (then they register themselves like in MaaSakhi); otherwise the leader adds members."""
-import time
+import logging, time
 from sqlalchemy import select
 import auth, bootstrap, convo, db, i18n, svc
 
 SEEN, PREF, ONB = set(), {}, {}
 SKILLS = {"1": "cutting", "2": "stitching", "3": "finishing", "4": "packing"}
-HELP = {"buyer": "Send your order as text or voice (quantity, price per piece, days). STATUS lists orders. ACCEPT <id> accepts a quote. RECEIVED <id> <pieces> confirms delivery (add FINAL to accept a shortfall). CANCEL <id> before work starts. LANG 1/2/3 changes language.",
-        "leader": "ORDERS, QUOTE <id> [price], PLAN <id>, START <id>, PASS <id> <name>, REWORK <id> <name> <pieces> <reason>, RISK <id> [days left], PROGRESS <id>, CHECKLIST <id>, PAYOUT <id> [name rework-count], APPROVE <id>, RESOLVE <id> <note>, READY <id> <packed pieces>, DISPATCH <id> <courier> [tracking], BLOCK <id> <reason>, UNBLOCK <id>, CANCEL <id> <reason>, MESSAGE ALL <text>, LEAVES, LEAVEAPPROVE <id> [note]."}
+log = logging.getLogger("sakhi.bot")
 
 def _id(w):
     try: return int(w[1])
@@ -35,7 +34,7 @@ def _buyer(u, t, w, media):
     if c == "group":
         if len(w) < 2: return convo.change_group(u, auth.norm(u["phone"]))
         svc.set_preferred_group(u, _id(w)); return "Group selected."
-    if (len(w) == 1 and c in ("help", "hi", "hello", "namaste")) or not t: return HELP["buyer"]
+    if (len(w) == 1 and c in ("help", "hi", "hello", "namaste")) or not t: return convo.role_menu(u)
     groups = svc.groups()
     group_id = u.get("preferred_group_id") or svc.preferred_group(u)
     if not group_id and len(groups) == 1: group_id = groups[0]["id"]
@@ -56,7 +55,8 @@ def _leader(u, t, w, media):
         if len(w) != 3 or not w[1].isdigit() or w[2] not in ("1", "2"):
             raise svc.Err(422, "Send JOIN <request number> 1 to approve or 2 to reject")
         result = svc.resolve_join_request(u, int(w[1]), w[2] == "1")
-        return f"Join request #{w[1]} {result['status']}."
+        key = "join_request_approved" if result["status"] == "approved" else "join_request_rejected"
+        return i18n.t(key, u["lang"], order=w[1])
     if c == "accept": v = svc.accept_quote(u, _id(w)); return f"Recorded: the buyer accepted order #{v['id']} at Rs {v['quote']}. Send PLAN {v['id']}."
     if c == "orders": return "\n".join(_fmt(v) for v in svc.my_orders(u)[:8]) or "No orders."
     if c == "checklist": return _checklist(u, w, t)
@@ -102,7 +102,7 @@ def _leader(u, t, w, media):
         i = next((k for k, d in enumerate((o or {}).get("disputes", [])) if d["open"]), None)
         if i is None: return "No open dispute on that order."
         v = svc.resolve_dispute(u, oid, i, " ".join(t.split()[2:]) or "resolved by leader"); return f"Dispute resolved. Order status: {_st(v)}."
-    return HELP["leader"]
+    return convo.role_menu(u)
 
 def _seller(u, t, w, media):
     c, L = (w[0] if w else ""), u["lang"]
@@ -141,29 +141,148 @@ def _seller(u, t, w, media):
         reason = " ".join(word for word in w[1:] if word.strip(",") not in day_set)
         result = svc.member_request_leave(u, days, reason)
         return f"Leave request #{result['id']} sent to your leader."
-    return i18n.t("help_seller", L)
+    return convo.role_menu(u)
+
+def _onboard_state(phone):
+    with db.S() as s:
+        state = s.get(db.ChatState, phone)
+        if not state or not (state.step or "").startswith("onboard_"):
+            return None
+        if time.time() - (state.updated_at or 0) > convo.TTL:
+            lang = state.lang or "en"
+            state.step, state.data, state.updated_at = "onboard_lang", {}, time.time()
+            s.commit()
+            return {"step": "onboard_lang", "data": {}, "expired": True, "lang": lang}
+        return {"step": state.step, "data": dict(state.data or {}), "expired": False,
+                "lang": state.lang or "en"}
+
+def _onboard_save(phone, step, data=None, lang="en"):
+    with db.S() as s:
+        state = s.get(db.ChatState, phone) or db.ChatState(
+            phone=phone, step=step, data=data or {}, lang=lang, updated_at=time.time()
+        )
+        state.step, state.data, state.lang, state.updated_at = step, data or {}, lang, time.time()
+        s.merge(state)
+        s.commit()
+
+def _onboard_clear(phone):
+    with db.S() as s:
+        state = s.get(db.ChatState, phone)
+        if state:
+            state.step, state.data, state.updated_at = None, {}, time.time()
+            s.commit()
 
 def _onboard(phone, t, msg_id):
-    """WhatsApp onboarding; a member joins only after code validation and leader approval."""
-    st = ONB.get(phone); w = t.strip().lower()
-    if not st: ONB[phone] = {"step": "lang"}; return i18n.t("menu", "en")
-    L = st.get("lang", "en")
-    if st["step"] == "lang":
-        if w not in ("1", "2", "3"): return i18n.t("menu", "en")
-        st.update(lang=i18n.LANGS[w], step="name"); return i18n.t("ask_name", st["lang"])
-    if st["step"] == "name":
-        st.update(name=t.strip()[:40] or "Guest", step="role"); return i18n.t("ask_role", L)
-    if st["step"] == "role":
-        if w not in ("1", "2"): return i18n.t("ask_role", L)
-        if w == "2": ONB.pop(phone); svc.register_self(phone, st["name"], "buyer", lang=L); return i18n.t("joined", L, name=st["name"]) + "\n" + HELP["buyer"]
-        st.update(role="seller", step="skill"); return i18n.t("ask_skill", L)
-    if st["step"] == "skill":
-        if w not in SKILLS: return i18n.t("ask_skill", L)
-        st.update(skill=SKILLS[w], step="group_code"); return i18n.t("ask_group_code", L)
-    if st["step"] == "group_code":
-        svc.submit_join_request(phone, st["name"], st["skill"], L, t)
-        ONB.pop(phone)
-        return i18n.t("join_waiting", L)
+    """Persist registration progress in ChatState; role and consent are explicit."""
+    state = _onboard_state(phone)
+    if not state:
+        _onboard_save(phone, "onboard_lang")
+        return i18n.t("welcome_language", "en")
+    data, step, lang = state["data"], state["step"], state["lang"]
+    text = (t or "").strip()
+    word = " ".join(text.lower().split())
+    if state["expired"]:
+        return i18n.t("session_expired", lang) + "\n" + i18n.t("welcome_language", lang)
+    if word in ("english", "hindi", "hinglish"):
+        lang = i18n.LANGS[word]
+        if step == "onboard_lang":
+            _onboard_save(phone, "onboard_name", {"lang": lang}, lang)
+            return i18n.t("ask_name", lang)
+        _onboard_save(phone, step, data, lang)
+        prompt = {
+            "onboard_lang": "welcome_language",
+            "onboard_name": "ask_name",
+            "onboard_role": "ask_role",
+            "onboard_consent": "consent_buyer" if data.get("role") == "buyer" else "consent_member",
+            "onboard_skill": "ask_skill",
+            "onboard_group_code": "ask_group_code",
+        }[step]
+        return i18n.t(prompt, lang)
+    if word in ("cancel", "stop", "exit"):
+        _onboard_clear(phone)
+        return i18n.t("cancelled", lang)
+    if word in ("9", "menu", "help"):
+        _onboard_save(phone, "onboard_lang", {}, lang)
+        return i18n.t("welcome_language", lang)
+    if word in ("0", "back"):
+        previous = {
+            "onboard_name": "onboard_lang",
+            "onboard_role": "onboard_name",
+            "onboard_consent": "onboard_role",
+            "onboard_skill": "onboard_consent",
+            "onboard_group_code": "onboard_skill",
+        }.get(step, "onboard_lang")
+        keep = {
+            "onboard_lang": set(), "onboard_name": {"lang"},
+            "onboard_role": {"lang", "name"}, "onboard_consent": {"lang", "name", "role"},
+            "onboard_skill": {"lang", "name", "role", "consent"},
+            "onboard_group_code": {"lang", "name", "role", "consent", "skill"},
+        }[previous]
+        data = {k: v for k, v in data.items() if k in keep}
+        _onboard_save(phone, previous, data, lang)
+        prompt = {
+            "onboard_lang": i18n.t("welcome_language", lang),
+            "onboard_name": i18n.t("ask_name", lang),
+            "onboard_role": i18n.t("ask_role", lang),
+            "onboard_consent": i18n.t("consent_buyer" if data.get("role") == "buyer" else "consent_member", lang),
+            "onboard_skill": i18n.t("ask_skill", lang),
+        }[previous]
+        return prompt
+    if step == "onboard_lang":
+        code = i18n.LANGS.get(word)
+        if not code:
+            return i18n.t("invalid_choice", "en") + "\n" + i18n.t("welcome_language", "en")
+        _onboard_save(phone, "onboard_name", {"lang": code}, code)
+        return i18n.t("ask_name", code)
+    if step == "onboard_name":
+        if not text:
+            return i18n.t("invalid_choice", lang) + "\n" + i18n.t("ask_name", lang)
+        data["name"] = text[:40]
+        _onboard_save(phone, "onboard_role", data, lang)
+        return i18n.t("ask_role", lang)
+    if step == "onboard_role":
+        if word not in ("1", "2"):
+            return i18n.t("invalid_choice", lang) + "\n" + i18n.t("ask_role", lang)
+        data["role"] = "seller" if word == "1" else "buyer"
+        _onboard_save(phone, "onboard_consent", data, lang)
+        return i18n.t("consent_member" if word == "1" else "consent_buyer", lang)
+    if step == "onboard_consent":
+        if word in ("2", "no", "nahi", "nahin", "नहीं", "नही", "ಇಲ್ಲ"):
+            _onboard_clear(phone)
+            return i18n.t("declined_consent", lang)
+        if word not in ("1", "yes", "haan", "ha", "हाँ", "हां", "ಹೌದು"):
+            key = "consent_buyer" if data.get("role") == "buyer" else "consent_member"
+            return i18n.t("invalid_choice", lang) + "\n" + i18n.t(key, lang)
+        data["consent"] = True
+        if data.get("role") == "buyer":
+            try:
+                svc.register_self(phone, data["name"], "buyer", lang=lang)
+            except svc.Err as e:
+                _onboard_clear(phone)
+                return i18n.t("already_registered", lang) if e.code == 409 else i18n.t("unregistered", lang)
+            _onboard_clear(phone)
+            convo._save(phone, "menu", {})
+            return i18n.t("registered_buyer", lang, name=data["name"])
+        _onboard_save(phone, "onboard_skill", data, lang)
+        return i18n.t("ask_skill", lang)
+    if step == "onboard_skill":
+        if word not in SKILLS:
+            return i18n.t("invalid_choice", lang) + "\n" + i18n.t("ask_skill", lang)
+        data["skill"] = SKILLS[word]
+        _onboard_save(phone, "onboard_group_code", data, lang)
+        return i18n.t("ask_group_code", lang)
+    if step == "onboard_group_code":
+        if not text:
+            return i18n.t("invalid_choice", lang) + "\n" + i18n.t("ask_group_code", lang)
+        try:
+            svc.submit_join_request(phone, data["name"], data["skill"], lang, text, consent=True)
+        except svc.Err as e:
+            if e.code == 409:
+                _onboard_clear(phone)
+                return i18n.t("already_registered", lang)
+            return i18n.t("group_code_invalid", lang)
+        _onboard_clear(phone)
+        return i18n.t("join_waiting", lang)
 
 def handle(sender, text, msg_id=None, media=None):
     if msg_id:
@@ -179,11 +298,17 @@ def handle(sender, text, msg_id=None, media=None):
              "phone": x.phone, "lang": x.lang or "en"} if x else None
     t = (text or "").strip()
     if not u:
-        if svc.pending_join_request(phone): return "Your request is still waiting for your group leader."
+        if svc.pending_join_request(phone):
+            with db.S() as s:
+                pending = s.scalars(select(db.JoinRequest).where(
+                    db.JoinRequest.phone == phone, db.JoinRequest.status == "pending"
+                )).first()
+            return i18n.t("join_waiting", pending.lang if pending else "en")
         if svc.open_registration():
             try: return _onboard(phone, t, msg_id)
-            except svc.Err as e: return f"Not done: {e.msg}"
-        return "This number is not registered. Please ask your group leader or mission coordinator to add you."
+            except svc.Err:
+                return i18n.t("unregistered", "en")
+        return i18n.t("unregistered", "en")
     w = t.lower().split()
     if u["role"] == "leader" and w:
         with db.S() as s:
@@ -193,9 +318,12 @@ def handle(sender, text, msg_id=None, media=None):
         if ids and w[0] in ("1", "2", "yes", "no", "haan", "हाँ", "हां", "ಹೌದು", "ಸರಿ", "ಇಲ್ಲ"):
             approved = w[0] in ("1", "yes", "haan", "हाँ", "हां", "ಹೌದು", "ಸರಿ")
             result = svc.resolve_join_request(u, ids[0], approved)
-            return f"Join request #{ids[0]} {result['status']}."
+            key = "join_request_approved" if result["status"] == "approved" else "join_request_rejected"
+            return i18n.t(key, u["lang"], order=ids[0])
     if w and w[0] == "role" and bootstrap.owner_phone() == auth.norm(sender):         # owner only: act as each role from one phone
-        try: r = svc.switch_owner_role(u, w[1] if len(w) > 1 else ""); return f"You are now: {r}. Send HELP to see what you can do."
+        try:
+            r = svc.switch_owner_role(u, w[1] if len(w) > 1 else "")
+            return i18n.t("owner_role_changed", u["lang"], role=r)
         except svc.Err as e: return f"Not done: {e.msg}"
     if w and w[0] in ("lang", "language", "bhasha", "भाषा") or (len(w) == 1 and w[0] in ("hindi", "english", "hinglish")):
         code = i18n.LANGS.get(w[-1]) if len(w) > 0 and w[-1] in i18n.LANGS else None
@@ -222,9 +350,10 @@ def handle(sender, text, msg_id=None, media=None):
     except svc.Err as e:
         return f"Not done: {e.msg}"
     except Exception:
-        convo._clear(phone); return "Sorry, something went wrong on my side. Send MENU to start again."
+        log.exception("guided chatbot step failed")
+        convo._clear(phone); return i18n.t("try_again", u["lang"])
     try:
         out = {"buyer": _buyer, "leader": _leader, "seller": _seller}.get(u["role"], lambda *_: "Please use the web dashboard.")(u, t, w, media)
-        return out + ("\n\nSend MENU for the guided menu." if w == ["help"] else "")
+        return out
     except svc.Err as e:
         return f"Not done: {e.msg}"

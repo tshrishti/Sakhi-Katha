@@ -59,7 +59,7 @@ def test_officer_sees_aggregates_only(world):
 
 def test_whatsapp_bot_roles_and_idempotency(world):
     assert "Choose your language" in bot.handle("whatsapp:+911234567890", "hi")          # OPEN_REGISTRATION=1: a new number starts registration
-    assert "Welcome to Sakhi Khata" in bot.handle("whatsapp:" + BUYER, "hi", "SM1")
+    assert "What would you like to do?" in bot.handle("whatsapp:" + BUYER, "hi", "SM1")
     assert bot.handle("whatsapp:" + BUYER, "hi", "SM1") is None                        # duplicate delivery ignored
     place()
     assert "Quote Rs 85" in bot.handle("whatsapp:" + LEADER, "quote 1")
@@ -87,7 +87,7 @@ def orders(world, who="leader"): return world.login(PH[who]).get("/api/leader/or
 def to(world, who): return [m["text"] for m in world.sent if m["phone"] == PH[who]]
 
 def test_whatsapp_full_flow_updates_dashboards(world):
-    assert "confirmed and sent" in place()
+    assert "Order #1 sent" in place()
     assert "Quote Rs 85" in chat("leader", "QUOTE 1")
     assert orders(world)[0]["status"] == "quoted" and any("Quote for order #1" in m for m in to(world, "buyer"))
     assert "price" not in orders(world, "buyer")[0]                                  # buyer view still hides internals
@@ -115,7 +115,7 @@ def test_owner_phone_is_bootstrapped_and_can_switch_role(world, monkeypatch):
     bootstrap.ensure()
     with db.S() as s: u = s.scalars(select(db.User).where(db.User.phone == "+919315168344")).one(); assert u.role == "leader" and u.group_id
     me = "whatsapp:+919315168344"
-    assert "You are now: buyer" in bot.handle(me, "role buyer") and "confirmed and sent" in place(me[len("whatsapp:"):])
+    assert "You are now: buyer" in bot.handle(me, "role buyer") and "Order #1 sent" in place(me[len("whatsapp:"):])
     assert "You are now: leader" in bot.handle(me, "ROLE leader") and "Quote Rs 85" in bot.handle(me, "QUOTE 1")
     assert "You are now: seller" in bot.handle(me, "role member")
     assert "Not done" in bot.handle(me, "role boss")
@@ -125,22 +125,26 @@ def test_owner_phone_is_bootstrapped_and_can_switch_role(world, monkeypatch):
 def test_whatsapp_self_registration_in_hindi(world):
     me = "whatsapp:+919811122233"
     assert "Choose your language" in bot.handle(me, "hello")
-    assert bot.handle(me, "2") == "आपका नाम?"
+    assert "आपका नाम" in bot.handle(me, "2")
     assert "कौन हैं" in bot.handle(me, "Asha")
-    assert "कौन हैं" in bot.handle(me, "9")                                                # invalid choice: asked again, nothing registered
+    assert "भाषा चुनें" in bot.handle(me, "9")
+    assert "आपका नाम" in bot.handle(me, "2")
+    assert "कौन हैं" in bot.handle(me, "Asha")
+    assert "क्या यह ठीक है" in bot.handle(me, "1")
     assert "हुनर" in bot.handle(me, "1")
     assert "समूह कोड" in bot.handle(me, "2")
     out = bot.handle(me, "482913"); assert "लीडर" in out and "अनुरोध" in out
     assert "approved" in bot.handle("whatsapp:" + LEADER, "1")
-    assert "Asha" in next(m["text"] for m in world.sent if m["phone"] == "+919811122233")
+    assert "मंज़ूरी" in next(m["text"] for m in world.sent if m["phone"] == "+919811122233")
     from sqlalchemy import select
     with db.S() as s:
         member = s.scalars(select(db.User).where(db.User.phone == "+919811122233")).one()
         assert member.role == "seller" and member.active and member.group_id
     j = "whatsapp:+919822233344"
     for step in ("hi", "1", "Guest"): bot.handle(j, step)
-    out = bot.handle(j, "2"); assert "Welcome, Guest" in out and "ACCEPT" in out
-    assert "confirmed and sent" in place(j[len("whatsapp:"):])
+    assert "Is that okay?" in bot.handle(j, "2")
+    out = bot.handle(j, "1"); assert "Welcome, Guest" in out and "Place an order" in out
+    assert "Order #1 sent" in place(j[len("whatsapp:"):])
 
 def test_language_switch_changes_the_pay_slip_not_the_numbers(world):
     start_order(); chat("leader", "PAYOUT 1 lakshmi 4")
@@ -222,11 +226,11 @@ def smart(parts, today=None):
     o, un = llm._finish(o, un, __import__("datetime").date(2026, 10, 26)); return {"order": o, "unclear": un, "source": "test"}
 
 def test_hi_shows_role_menu_and_commands_still_work(world):
-    b = say("buyer", "hi"); assert "Welcome to Sakhi Khata" in b and "1. Place a new order" in b and "2. Check an existing order" in b and "Manage my assigned work" not in b
-    assert "1. Place a new order" in say("leader", "Hello") and "3. Review orders waiting for me" in say("leader", "menu")
-    assert "1. Manage my assigned work" in say("m1", "namaste") and "2. Check my earnings" in say("m1", "hi")
+    b = say("buyer", "hi"); assert "What would you like to do?" in b and "1 Place an order" in b and "2 Check my orders" in b and "My tasks" not in b
+    assert "1 New orders" in say("leader", "Hello") and "3 Review orders" in say("leader", "menu")
+    assert "1 My tasks" in say("m1", "namaste") and "3 My pay" in say("m1", "hi")
     assert "No orders yet" in say("buyer", "STATUS")                                       # typed commands are the fallback
-    h = say("leader", "help"); assert "QUOTE <id>" in h and "Send MENU" in h
+    h = say("leader", "help"); assert "What would you like to do?" in h and "Send 9" in h
 
 def test_new_order_asks_name_then_only_what_is_missing_then_confirms(world, monkeypatch):
     monkeypatch.setattr(llm, "extract_details", smart)
@@ -237,9 +241,15 @@ def test_new_order_asks_name_then_only_what_is_missing_then_confirms(world, monk
     assert "1. Confirm order" in r and "2. Edit details" in r and "3. Cancel order" in r
     assert "What would you like to change" in say("buyer", "2")
     r = say("buyer", "quantity 250, price 65"); assert "250 pieces" in r and "₹65 per piece" in r and "Please confirm" in r
-    r = say("buyer", "1"); assert "Order #1 is confirmed" in r and "Test SHG" in r
+    import db
+    with db.S() as s:
+        leader = s.query(db.User).filter_by(phone=LEADER).first()
+        leader.lang = "hi"
+        s.commit()
+    r = say("buyer", "1"); assert "Order #1 sent" in r and "Test SHG" in r
     o = orders(world, "buyer")[0]; assert o["order"]["qty"] == 250 and o["order"]["buyer_name"] == "Test Buyer" and "price" not in o
-    assert any("New order #1 from Test Buyer" in m for m in to(world, "leader"))
+    notice = next(m for m in to(world, "leader") if "नया ऑर्डर #1" in m)
+    assert "1 नए ऑर्डर देखें" in notice and "9 मेनू" in notice and "QUOTE" not in notice
 
 def test_single_missing_detail_accepts_a_bare_number(world):
     say("buyer", "hi"); say("buyer", "1"); assert "price per piece" in say("buyer", "200 bags, cloth bags, 5 days")
@@ -250,7 +260,7 @@ def test_cancel_creates_nothing(world):
     place_steps = lambda: say("buyer", ORDER.replace(", same as last time", ""))
     place_steps(); assert "not placed" in say("buyer", "3") and orders(world, "buyer") == []
     place_steps(); say("buyer", "cancel"); assert "cancelled" in say("buyer", "1") and orders(world, "buyer") == []
-    assert "Namaste" in say("buyer", "hi")
+    assert "What would you like to do?" in say("buyer", "hi")
 
 def test_ai_details_voice_photo_and_pdf_are_confirmed_not_assumed(world, monkeypatch):
     monkeypatch.setattr(llm, "extract_details", lambda parts, today=None: RICH)
@@ -265,7 +275,7 @@ def test_ai_details_voice_photo_and_pdf_are_confirmed_not_assumed(world, monkeyp
     say("buyer", "9"); say("buyer", "1")
     assert "could not read any text" in bot.handle("whatsapp:" + BUYER, "", None, {"kind": "pdf", "text": None})
     assert "What I read in the PDF" in bot.handle("whatsapp:" + BUYER, "", None, {"kind": "pdf", "text": "Order: 200 blue bags"})
-    assert "confirmed" in say("buyer", "1")
+    assert "Order #1 sent" in say("buyer", "1")
     import db
     with db.S() as s: d = s.get(db.Order, 1).data; assert d["evidence"]["source"] == "pdf" and d["order"]["delivery_date"] == "2026-11-15"   # original source kept with the order
 
@@ -273,7 +283,7 @@ def test_first_message_can_be_an_order_and_state_survives_reload(world, monkeypa
     monkeypatch.setattr(llm, "extract_details", smart)
     assert "Please confirm" in say("buyer", ORDER.replace(", same as last time", ""))      # stored buyer name removes a question
     import importlib; importlib.reload(convo)                                              # state is in the database, not in memory
-    assert "confirmed and sent" in say("buyer", "1")
+    assert "Order #1 sent" in say("buyer", "1")
 
 def test_leader_places_order_sees_pricing_and_sends_counteroffer(world):
     for x in ("hi", "1", "ABC Stores", ORDER, "cloth bags"): say("leader", x)
@@ -322,17 +332,17 @@ def test_member_work_flow_accept_done_issue_and_sample(world):
 
 def test_member_earnings_approve_or_dispute_in_conversation(world):
     start_order(); chat("leader", "PAYOUT 1 lakshmi 4")
-    say("m1", "hi"); e = say("m1", "2"); assert "Order #1" in e and "you made" in e and "1. I agree, approve it" in e
+    say("m1", "hi"); e = say("m1", "3"); assert "Order #1" in e and "you made" in e and "1. I agree, approve it" in e
     assert "I am sorry" in say("m1", "2") and "recorded" in say("m1", "the count is wrong")
     assert orders(world)[0]["disputes"][0]["open"] and "count is wrong" in orders(world)[0]["disputes"][0]["reason"]
-    say("m2", "hi"); say("m2", "2"); assert "Thank you" in say("m2", "1")
+    say("m2", "hi"); say("m2", "3"); assert "Thank you" in say("m2", "1")
 
 def test_officer_is_pointed_to_the_dashboard(world):
     assert "Please use the web dashboard" in say("officer", "hi")
 
 def test_a_crash_in_the_conversation_never_leaves_the_user_stuck(world, monkeypatch):
-    monkeypatch.setattr(convo, "_welcome", lambda role: 1 / 0)
-    assert "Send MENU to start again" in say("buyer", "hi")
+    monkeypatch.setattr(convo, "_welcome", lambda *args, **kwargs: 1 / 0)
+    assert "try again in a minute" in say("buyer", "hi")
 
 
 # ---------------- AI quality screening: flags with confidence against the buyer's checklist; the leader decides ----------------
@@ -562,7 +572,7 @@ def test_product_selection_uses_catalogue_and_rejects_arbitrary_product_text(wor
     r = say("buyer", "1")
     assert "How many pieces" in r and "Product: 1" not in r
     assert "Please confirm" in say("buyer", "200")
-    assert "confirmed and sent" in say("buyer", "1")
+    assert "Order #1 sent" in say("buyer", "1")
     assert orders(world, "buyer")[0]["order"]["product"] == "Cloth bag"
 
 def test_buyer_selects_and_remembers_group_and_can_change_it(world):
@@ -573,7 +583,7 @@ def test_buyer_selects_and_remembers_group_and_can_change_it(world):
     r = say("buyer", "I need 100 bags, Rs 60 each, in 5 days")
     assert "Which group" in r and "Test SHG" in r and "Second SHG" in r
     assert "Please confirm" in say("buyer", "2")
-    assert "confirmed and sent" in say("buyer", "1")
+    assert "Order #1 sent" in say("buyer", "1")
     assert orders(world, "buyer")[0]["group"] == "Second SHG"
     assert "Second SHG" in say("buyer", "change group")
     say("buyer", "1")
@@ -702,4 +712,4 @@ def test_expired_flow_requires_resume_and_navigation_does_not_cancel(world):
     assert "restored" in say("buyer", "1")
     assert "Please confirm" in say("buyer", "Rs 60 each in 5 days")
     assert "What would you like to change" in say("buyer", "back")
-    assert "Welcome to Sakhi Khata" in say("buyer", "9")
+    assert "What would you like to do?" in say("buyer", "9")
